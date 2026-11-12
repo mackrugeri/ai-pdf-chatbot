@@ -1,7 +1,7 @@
 # Capacity and Load-Test Plan: AI PDF Chatbot
 
 Status: sizing framework and release targets; no capacity measured
-Version: 1.1
+Version: 2.0
 Date: 2026-11-13
 
 ## 1. Confirmed requirement and unknowns
@@ -9,6 +9,12 @@ Date: 2026-11-13
 The user requests **1,000–5,000 requests per second**, not merely that many registered or concurrent users. The architecture retains Python, Ollama, Qwen3 4B, LlamaIndex, ChromaDB, FastAPI, Streamlit, and PostgreSQL, with the supporting services in [TECH_STACK.md](TECH_STACK.md).
 
 The endpoint mix, active browser sessions, prompt/output distributions, corpus size, upload size/rate, latency SLOs, and infrastructure budget are unresolved. Therefore no server count, GPU count, monthly cost, or achieved throughput can honestly be specified yet. A developer Mac is a functional development environment, not evidence of this production capacity. The old 15-day roadmap is not a schedule commitment for this system.
+
+### Applicability to the portfolio deliverable
+
+The current goal is to implement and demonstrate a production-oriented architecture locally without a dedicated GPU. The 1,000–5,000 RPS range remains a future sizing/design objective, not a prerequisite for coding, a promised personal-machine capability, or a portfolio achievement claim. Use small-scale local correctness/resource tests, and record production benchmarks as not run until representative hardware is available. No GPU purchase or rental is required now.
+
+Evidence labels: `local-fake` (deterministic model adapter), `local-real` (actual pinned Qwen3/Nomic), `simulated-load` (specified fake downstream, actual application path), and `production-measured` (representative real hardware/services/models). Never merge their results or project mock/CPU throughput into GPU capacity. Local default: one model operation at a time, one worker per enabled queue class, small synthetic/permitted PDFs; tune limits downward for memory. [LOCAL_DEVELOPMENT.md](LOCAL_DEVELOPMENT.md) owns the detailed profiles.
 
 ## 2. Keep measurements distinct
 
@@ -25,7 +31,7 @@ Report all of the following, not a single aggregate success number:
 
 ## 3. Workload profiles
 
-Build a configurable workload file and agree on the exact production mix before signoff. Initially test these separately at 1,000, 2,500, and 5,000 offered RPS:
+Build a configurable workload file and agree on the exact production mix before signoff. For future production certification, test applicable profiles separately at 1,000, 2,500, and 5,000 offered RPS. Local development uses explicitly smaller rates and must not attempt these targets by default:
 
 | Profile | Purpose | Required reporting |
 | --- | --- | --- |
@@ -76,25 +82,27 @@ In steady state, expiry/cleanup must remove at least the arriving expired data v
 2. **Streamlit:** measure sessions, memory/session, rerun CPU, uploads, affinity, draining, and reconnect; prove the actual UI path rather than bypassing it. Selected UI stays a release gate.
 3. **PostgreSQL:** benchmark ownership/list queries, job/results/outbox writes, indexes, pool limits, migrations, replication/failover, and cleanup under representative data volume.
 4. **ChromaDB:** benchmark the chosen supported service/distributed topology with realistic owner filters, corpus/chunk counts, simultaneous writes, index sizes, and p95/p99 retrieval latency. Confirm licensing/availability and operating requirements; do not assume standalone pods become distributed by sharing a volume.
-5. **Embedding/generation:** test model identity, tokenizer, quantization, lengths, concurrency, warm/cold behavior, memory/KV cache, GPU utilization, per-replica throughput, and failure recovery. Distinguish embedding from generation demand.
+5. **Embedding/generation:** test model identity, tokenizer, quantization, lengths, concurrency, warm/cold behavior, memory/KV cache, GPU utilization, per-replica throughput, and failure recovery. Distinguish embedding from generation demand. Verify guaranteed query-embedding service while saturating ingestion; shared local endpoints must preserve scheduler correctness, while production must meet its stated query service budget.
 6. **Queues/admission:** prove durable publication, duplicate handling, fair quotas, bounded backlog, deadlines, recovery, and stable completion rate. Autoscaling must account for model-loading delay.
 7. **Object/network tier:** prove upload byte throughput, parallel streams, private access, signed-URL behavior, and retention cleanup. HTTP request count does not size bandwidth.
 
 ## 6. Benchmark procedure and gates
 
-Use a versioned open-loop k6 or Locust scenario on independent load generators that can themselves sustain the offered rate. Synchronize clocks and record exact image/model/index/config identities. Separate cold-cache/warm-cache and cold-model/warm-model results.
+After representative infrastructure is available, use a versioned open-loop k6 or Locust scenario on independent load generators that can themselves sustain the offered rate. Synchronize clocks and record exact image/model/index/config identities. Separate cold-cache/warm-cache and cold-model/warm-model results.
 
 Suggested test sequence: functional smoke -> component saturation search -> 1,000-RPS sustained -> 2,500-RPS sustained -> 5,000-RPS sustained -> mixed soak -> burst/overload -> failure recovery. Initial sustained tests run at least 30 minutes after warmup, followed by a two-hour target-profile soak. Longer operational observation is still needed for availability claims.
 
 Before executing certification, set p95/p99 API and complete-answer latency budgets, error/acceptance targets, maximum queue age, upload service budgets, corpus sizes, and allowed failure windows in the workload file. These are release-blocking decisions, not blanks to hide in a report. A successful run must meet those targets, maintain bounded/stable queues, complete the admitted workload, preserve authorization/citation correctness, and survive the defined failure test. Use enough generation time after an arrival burst to observe completion; never stop at admission.
 
-Include upload-version overwrite races, job-list rediscovery/pagination under load, pre-aged payload expiry, and restore of a pre-deletion backup with the newer independent journal. A missing/incomplete journal must keep restored access closed; recovery testing includes writer fencing and the final replay checkpoint.
+Include attempt-isolated vector write/cleanup races, input-payload survival beyond queue wait, upload-version overwrite races, job-list rediscovery/pagination under load, pre-aged payload expiry, and restore of a pre-deletion backup with the newer independent journal. A missing/incomplete journal must keep restored access closed; recovery testing includes writer fencing and the final replay checkpoint.
 
 Test worker/pod/node loss, model timeout, broker failover, database failover, Redis unavailability, object/vector errors, and deletion during retries. Verify no cross-owner exposure and no lost durable accepted jobs. Planned overload rejects count separately; report offered-to-completed ratios honestly.
 
 ## 7. Scaling and readiness decisions
 
 Size each tier from its measured bottleneck. Use independently scaled API/UI/worker pools and GPU pools, connection budgets, durable queues, and shared storage. Scaling adds resources and operational cost; load balancing cannot manufacture model capacity. Maintain warm headroom and fair per-owner quotas; admission must reject excess rather than let tail latency grow without bound.
+
+These production capacity gates do not block the portfolio engineering milestone; unresolved hardware measurements remain visible in the evidence report. A portfolio can accurately describe the architecture as designed for independent scaling while explicitly stating that target throughput is unverified.
 
 If Streamlit, the available Chroma deployment, or Ollama/Qwen3 serving cannot meet the agreed profile, record the component limitation, achieved results, resource estimates, and alternatives. Ask the project owner before replacing a selected main-stack technology. The release may be certified for a smaller explicitly labeled profile, but not advertised as 5,000 RPS without the required evidence.
 

@@ -1,7 +1,7 @@
 # Technology Stack: AI PDF Chatbot
 
 Status: production architecture choices; installation and capacity unverified
-Version: 2.1
+Version: 3.0
 Date: 2026-11-13
 
 ## 1. Main stack
@@ -17,6 +17,8 @@ Date: 2026-11-13
 | ChromaDB | Vector search and indexed excerpts | Use a private service/distributed deployment validated against corpus, write rate, HA needs, and retrieval QPS; no per-API embedded indexes. |
 | FastAPI | Authenticated document, job, and chat API | Stateless replicas behind ingress; no ingestion/generation in API background tasks. |
 | Streamlit | User-facing document and chat interface | Replicas with WebSocket/session affinity; benchmark sessions, reruns, polling, uploads, and reconnect behavior. |
+
+Current deliverable: build/test this architecture locally without a dedicated GPU for a portfolio, with a configuration-driven path to later GPU deployment. Native/CPU Ollama, deterministic test models, single service replicas, and small fixtures are supported. No paid infrastructure or full production fleet is required locally. [LOCAL_DEVELOPMENT.md](LOCAL_DEVELOPMENT.md) defines environment parity and [DEPLOYMENT_GUIDE.md](DEPLOYMENT_GUIDE.md) defines the future GPU transition.
 
 A main-stack selection is not a throughput guarantee. No component replacement is authorized by a failed benchmark alone; record the result and review the change with the project owner.
 
@@ -51,13 +53,13 @@ Nomic Embed Text through Ollama is the supporting embedding model. Use the same 
 
 ## 4. Models and scaling
 
-Pin Qwen3 4B and embedding artifacts/digests, model-server image/version, tokenizer, quantization, context/output limits, and index fingerprint. Preload/warm replicas before readiness; never download models on an end-user request. Benchmark GPU memory, prompt prefill, decode, and mixed workloads with realistic lengths. Use separate embedding and generation pools to prevent bulk ingestion starving chat.
+Pin Qwen3 4B and embedding artifacts/digests, model-server image/version, tokenizer, quantization, context/output limits, and index fingerprint. Preload/warm replicas before readiness; never download models on an end-user request. Benchmark GPU memory, prompt prefill, decode, and mixed workloads with realistic lengths. Use separate embedding and generation pools in production, and reserve query-embedding capacity separately from bulk ingestion (dedicated endpoints or a guaranteed-capacity scheduler). A single local endpoint serializes model calls and schedules query versus ingestion work at bounded batch boundaries.
 
 Configure bounded per-endpoint concurrency and a scheduling layer that routes only within each replica's measured safe capacity. Adding API pods does not add tokens/second. Model-serving protocol adapters must remain isolated so a future runtime change can be reviewed without rewriting document ownership and RAG services.
 
 ## 5. Security and configuration
 
-Configure database/broker/Redis/object-store endpoints, OIDC issuer/audience/JWKS, model endpoint inventory, quotas, queue budgets, token limits, job deadlines, retention, and telemetry using validated environment settings and secret references. Production startup must reject unsafe defaults and absent required secrets. Commit only placeholder examples; do not store access tokens, content, credentials, dumps, or model artifacts in Git or container build contexts.
+Configure database/broker/Redis/object-store endpoints, OIDC issuer/audience/JWKS, model endpoint inventory, quotas, queue budgets, token limits, job deadlines, retention, and telemetry using validated environment settings and secret references. Production startup must reject unsafe defaults, absent required secrets, deterministic fake models, test signing keys/issuers, and local-only journal/storage configurations. Local/test modes must be explicit and must not bypass ownership or token-validation logic. Commit only placeholder examples; do not store access tokens, content, credentials, dumps, or model artifacts in Git or container build contexts.
 
 All storage and inference services are private. FastAPI validates access tokens independently of Streamlit and authorizes document/job IDs on every operation. Never trust an owner ID or plain identity header from the UI. Do not cache per-user data globally in Streamlit; keep state isolated and make critical results recoverable from the API.
 
@@ -74,6 +76,12 @@ All storage and inference services are private. FastAPI validates access tokens 
 | Multi-region active-active | Requires a separate consistency and cost design after the initial production deployment. |
 
 Docker, durable job infrastructure, authentication, monitoring, shared storage, load tests, and deployment automation are **not deferred** in this production baseline.
+
+### Local footprint versus future infrastructure
+
+Run only the profiles needed for the current milestone. PostgreSQL, RabbitMQ, Redis, a private S3-compatible local service, and a Chroma service have single-instance local equivalents; the exact local object-store implementation must pass versioning/checksum/access-policy contract tests. Native Ollama is outside the Compose network on a developer Mac; container-to-host connectivity must be explicitly configured and tested. Use a local OIDC provider for authenticated end-to-end tests; deterministic signed test tokens are limited to isolated automated tests using the same validation path.
+
+PgBouncer, Kubernetes, HA replicas, dedicated GPU pools, full dashboards, and distributed Chroma are production topology or optional local integration profiles. Their manifests/configuration can be authored locally without provisioning them. Do not require all profiles, both models, and all observability services to fit in memory at once. Functional development remains possible through deterministic fakes when real models do not fit. Model licenses and real-output claims still require actual model verification.
 
 ## 7. Evidence and change control
 

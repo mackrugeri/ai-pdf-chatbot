@@ -1,7 +1,7 @@
 # AI PDF Chatbot: Project Overview
 
 Status: production architecture planning; implementation and capacity unverified
-Version: 2.0
+Version: 3.0
 Date: 2026-11-13
 
 ## Product idea
@@ -9,6 +9,14 @@ Date: 2026-11-13
 Build an authenticated multi-user application that answers questions about uploaded text-based PDFs with verifiable filenames, original PDF page numbers, and source excerpts. Each user can access only their own documents and recent request results. The application should acknowledge missing evidence rather than invent an answer.
 
 Main stack: **Python, Ollama, Qwen3 4B, LlamaIndex, ChromaDB, FastAPI, Streamlit**. **PostgreSQL** is the selected application database for ownership, document/job state, idempotency, and audit metadata. ChromaDB remains the vector database.
+
+## Local portfolio deliverable and future production scope
+
+Build the production-oriented application locally without a dedicated GPU. Preserve API/worker/storage/auth boundaries, durable jobs, isolation, and recovery contracts. Use deterministic models for routine tests and optional actual Qwen3 4B/Nomic through local CPU/native Ollama for real-answer demonstrations. A fake-model demo must be labeled; it does not prove answer quality. Run service profiles incrementally so model inference and every infrastructure/monitoring service are not required simultaneously.
+
+The later GPU deployment uses the same application logic and protocols with different service endpoints, resource settings, runtime deployment, and measured concurrency. No GPU rental, Kubernetes cluster, hosting purchase, or proven high-RPS production service is required to complete the portfolio engineering milestone. Production manifests and runbooks are locally authored artifacts; actual GPU/HA/capacity checks remain pending until hardware exists.
+
+See [LOCAL_DEVELOPMENT.md](LOCAL_DEVELOPMENT.md) for the local route and [DEPLOYMENT_GUIDE.md](DEPLOYMENT_GUIDE.md) for migration.
 
 ## Production scope and traffic
 
@@ -64,7 +72,7 @@ OCR, complex table/chart reconstruction, shared workspaces, persistent conversat
 - [CAPACITY_PLAN.md](CAPACITY_PLAN.md): traffic profiles, sizing formulas, load tests, and evidence requirements.
 - [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md): phased delivery and exit gates.
 
-Next: resolve workload/SLO and hosting/GPU-budget inputs, validate main-stack component feasibility, then implement the foundation and authenticated vertical slice. Documentation changes do not mean the app is implemented or production-certified.
+Next: implement the locally runnable foundation and authenticated vertical slice using the recorded contracts; keep future hosting/GPU/SLO decisions in [DECISION_LOG.md](DECISION_LOG.md). Representative production benchmarking is deferred until infrastructure is available, not a gate on beginning development. The documentation map and consolidated review are in the repository README and [DOCUMENTATION_REVIEW.md](DOCUMENTATION_REVIEW.md). Documentation changes do not mean the app is implemented or production-certified.
 
 ## Background reference
 

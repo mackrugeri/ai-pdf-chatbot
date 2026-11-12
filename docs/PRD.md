@@ -1,7 +1,7 @@
 # Product Requirements Document: AI PDF Chatbot
 
 Status: production architecture baseline; not implemented or capacity-certified
-Version: 2.1
+Version: 3.0
 Date: 2026-11-13
 
 ## 1. Purpose and decisions
@@ -14,11 +14,21 @@ The user-confirmed traffic target is **1,000–5,000 requests per second (RPS)**
 
 The earlier single-user localhost scope and 15-day delivery target are superseded. Local development remains supported on the Mac; production capacity must be tested on representative infrastructure. No paid model API is required, but production compute, storage, networking, and operations are not assumed free.
 
-## 2. Document ownership
+## 2. Delivery scope: local portfolio first, GPU deployment later
+
+The current deliverable is a locally buildable portfolio application with production-oriented service boundaries and correctness, not an operating 5,000-RPS GPU deployment. No dedicated GPU, paid infrastructure, Kubernetes cluster, or measured production capacity is required to begin or finish the local engineering milestone. Keep the distributed contracts while running one instance of each needed service.
+
+Use deterministic model fakes for routine development/tests and optional real Qwen3 4B/Nomic inference through local Ollama on CPU or available native acceleration. Fake inference must be visibly labeled and isolated from real indexes; it proves software behavior, not answer quality. A real-model smoke/evaluation run is required before describing the demo as answering PDFs with Qwen3; if local resources cannot support it, report that evidence as pending rather than substitute a model silently.
+
+Three separate outcomes apply: (A) local portfolio implementation and test evidence; (B) deployment artifacts and a documented GPU migration path, with hardware-dependent checks explicitly pending; (C) production readiness/capacity verified on representative provisioned resources. Production-only sizing/HA/SLO decisions do not block A. No deployment or spending is requested by this plan.
+
+See [LOCAL_DEVELOPMENT.md](LOCAL_DEVELOPMENT.md), [DEPLOYMENT_GUIDE.md](DEPLOYMENT_GUIDE.md), [DECISION_LOG.md](DECISION_LOG.md), and [DOCUMENTATION_REVIEW.md](DOCUMENTATION_REVIEW.md).
+
+## 3. Document ownership
 
 [TECHNICAL_DESIGN.md](TECHNICAL_DESIGN.md) owns service and API contracts. [TECH_STACK.md](TECH_STACK.md) owns technology choices. [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) owns delivery order. [CAPACITY_PLAN.md](CAPACITY_PLAN.md) owns sizing and performance evidence. [PROJECT_IDEA.md](PROJECT_IDEA.md) summarizes the current scope. Update affected documents together when scope changes.
 
-## 3. User experience
+## 4. User experience
 
 1. Sign in using the configured identity provider.
 2. Upload a PDF and observe processing status without blocking other interactions.
@@ -30,7 +40,7 @@ The earlier single-user localhost scope and 15-day delivery target are supersede
 
 First release uses private documents per user; shared workspaces and document sharing are outside scope. The API derives ownership from authenticated identity, never from a client-supplied owner field.
 
-## 4. Functional requirements
+## 5. Functional requirements
 
 | ID | Requirement | Acceptance criterion |
 | --- | --- | --- |
@@ -48,13 +58,13 @@ First release uses private documents per user; shared workspaces and document sh
 | FR-12 | Explain limitations. | UI explains no OCR, independent questions, PDF-index page numbers, queue state, retention, and transient service errors. |
 | FR-13 | Provide operational visibility. | Operators can inspect sanitized metrics, audit events, job failures, readiness, and recovery procedures without default access to user content. |
 
-## 5. Product boundaries
+## 6. Product boundaries
 
 Included: authentication, private per-user PDFs, local/self-hosted generation, distributed durable processing, selected-document RAG, reconnectable short-lived request results, deletion, quotas, monitoring, deployment automation, backup/restore, and release evidence.
 
 Deferred product features: OCR, complex table/chart reconstruction, semantic duplicate detection, shared workspaces, persistent conversational memory, history-aware question rewriting, fine-tuning, and autonomous agents. Recent request persistence is for reconnect/retry reliability, not indefinite chat storage. English text is the initial evaluation language. Model output can be wrong even when citation identifiers are valid; human evaluation remains necessary.
 
-## 6. Nonfunctional requirements
+## 7. Nonfunctional requirements
 
 | ID | Requirement | Release evidence |
 | --- | --- | --- |
@@ -67,17 +77,20 @@ Deferred product features: OCR, complex table/chart reconstruction, semantic dup
 | NFR-07 | Recovery and retention. | Encrypted backups and a restore drill demonstrate a proposed RPO of 1 hour and RTO of 4 hours; a deletion journal protected independently of database recovery is replayed through a verified cutover point before restored data is exposed. |
 | NFR-08 | Operational readiness. | Dashboards, alerts, runbooks, readiness/liveness, and a named operational owner exist before release. |
 | NFR-09 | Sustainable job/result retention. | Size hot metadata, indexes, receipts, payloads, WAL/replicas, backups, and cleanup at admitted job rate; prove retention does not cause unbounded storage, block active work, or allow duplicate jobs after payload expiry. |
+| NFR-10 | Hardware-portable local development. | Run the same API/worker/storage contracts without a dedicated GPU; change only validated endpoint/deployment/resource settings for GPU hosting. Fakes and real-model evidence remain clearly separated. |
 
 RPO/RTO are initial project targets, not measured guarantees. Availability and latency SLOs must be agreed with a concrete workload and infrastructure budget before release; unresolved SLOs block capacity certification.
 
-## 7. Quality and acceptance
+## 8. Quality and acceptance
 
 Maintain a tuning dataset separate from a frozen, versioned release set of at least 100 cases: 80 answerable and 20 unsupported. Include direct facts, paraphrases, multi-passage questions, conflicts, misleading instructions, blank-page numbering, and selection isolation. Initial release targets: at least 90% of answerable cases have correct supported answers and expected evidence; at least 95% of unsupported cases abstain; every emitted citation resolves to a supplied authorized excerpt. These are proposed acceptance targets, not measurements. Access-control and deletion tests require zero failures.
 
-Other release gates: no unauthorized cross-user results; no lost accepted jobs in fault tests; deletion remains effective across retries and restore; setup and rollback drills pass; critical exploitable findings are resolved; relevant dependency/model licenses are reviewed; the exact capacity profile and SLOs pass on representative resources. A 20-question development smoke set may still be useful, but is not production certification.
+Portfolio acceptance requires local integration/correctness tests, reproducible setup instructions, synthetic/permitted demo fixtures, honest model/test evidence, and a documented deployment path. The 100-case semantic quality target applies to a real-model quality report, not fake-model tests. GPU/HA/full-capacity evidence can remain pending and must be labeled as such; this does not prevent a portfolio engineering release.
+
+Production release gates: no unauthorized cross-user results; no lost accepted jobs in fault tests; deletion remains effective across retries and restore; setup and rollback drills pass; critical exploitable findings are resolved; relevant dependency/model licenses are reviewed; the exact capacity profile and SLOs pass on representative resources. A 20-question development smoke set may still be useful, but is not production certification.
 
 Additional regression gates: mutate an upload during/after completion and verify only the pinned bytes are indexed; reconnect with no remembered job IDs and rediscover only the authenticated owner's recent jobs; restore a backup older than an acknowledged deletion and verify current journal replay prevents resurrection; run sustained job expiry/partition cleanup and ensure idempotency receipts outlive the retry horizon. See the technical design for exact contracts.
 
-## 8. Open decisions and release scope
+## 9. Open decisions and release scope
 
-Before sizing/signoff, record explicit values/selected providers and an accountable owner for each open decision: endpoint mix (including a 100% chat scenario), prompt/output lengths, data volume, upload rate, session count, latency SLOs, availability window, retention policy, provider/region, GPU budget, identity provider, supported Chroma deployment, immutable-object mechanism, independent deletion-journal protection/cutover, and job/result storage and cleanup budgets. Do not substitute guessed values for these release-blocking decisions. Measure Streamlit's session and upload behavior at target scale. If any selected component cannot meet the profile, record the blocker and request an explicit stack change; do not label the system ready by bypassing that component in tests.
+Before sizing/signoff, record explicit values/selected providers and an accountable owner for each open decision: endpoint mix (including a 100% chat scenario), prompt/output lengths, data volume, upload rate, session count, latency SLOs, availability window, retention policy, provider/region, GPU budget, identity provider, supported Chroma deployment, immutable-object mechanism, independent deletion-journal protection/cutover, and job/result storage and cleanup budgets. Track them in the decision log with an owner and required milestone. GPU capacity/provider/budget/HA decisions block production certification, not local implementation; local service contracts, auth boundaries, and isolation rules must be decided for development. Do not substitute guessed values for production evidence. Measure Streamlit's session and upload behavior at target scale. If any selected component cannot meet the profile, record the blocker and request an explicit stack change; do not label the system ready by bypassing that component in tests.

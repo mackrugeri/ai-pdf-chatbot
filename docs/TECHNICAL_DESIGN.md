@@ -1,7 +1,7 @@
 # Technical Design Document: AI PDF Chatbot
 
 Status: production architecture baseline; not implemented or load-certified
-Version: 2.1
+Version: 3.0
 Date: 2026-11-13
 
 Requirements: [PRD.md](PRD.md). Choices: [TECH_STACK.md](TECH_STACK.md). Sizing: [CAPACITY_PLAN.md](CAPACITY_PLAN.md). Delivery: [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md).
@@ -38,13 +38,21 @@ All services -> sanitized metrics/logs/traces -> operational monitoring
 
 API/UI processes do not run ingestion or model generation. Queue messages carry job IDs, not PDF text or tokens. Workers read ownership and payload references from PostgreSQL, then fetch authorized immutable payload objects from private storage. UI never accesses application databases or inference endpoints directly. Durable authoritative files live in object storage, not replica-local paths. Chroma runs as a separately operated service with a validated deployment topology, not an embedded index copied into each API pod.
 
+### Local deployment of the same architecture
+
+The current implementation target is local development without a dedicated GPU. Keep API, UI, durable jobs, authorization, storage adapters, and workers separate in code and protocol, while running single replicas in a staged Compose/native setup. Kubernetes, distributed Chroma, HA databases, and GPU fleets describe a future production topology; they are not local prerequisites. [LOCAL_DEVELOPMENT.md](LOCAL_DEVELOPMENT.md) defines profiles and contract parity.
+
+Define narrow model interfaces for question embeddings, document embeddings, and structured answer generation. Provide an Ollama HTTP adapter and a deterministic test fake; select through validated configuration, not hardware-specific branches in business logic. Production configuration rejects fake models, test issuers, default secrets, and test storage namespaces. Pin logical model/embedding/index identity, not a host path or GPU device. CPU-to-GPU migration changes model endpoint inventory, runtime placement, timeouts and measured concurrency budgets; it must not change document/API/job contracts. Run parity/quality checks after migration; rebuild only when the embedding/chunking fingerprint changes, not solely because the hardware changed.
+
+Native Ollama or a CPU-capable service is valid locally; optional acceleration is not required. On a small machine, serialize all real model calls and unload models between stages where supported. Full GPU drivers, device scheduling, and GPU manifests belong to the deployment profile only. Local fake/model mode is always shown in the UI and evaluation metadata.
+
 ## 2. Authentication and authorization
 
 Integrate an OIDC provider capable of issuing access tokens for the FastAPI audience. Streamlit authenticates the user and obtains that access token server-side through a supported tested flow. FastAPI independently validates signature, allowed algorithm, issuer, audience, expiry, and required scopes using bounded/cached JWKS retrieval and key rotation handling. An ID token or an unsigned owner header is not an API credential. Select and verify the actual provider/refresh/logout behavior before release; auth integration is a blocking milestone.
 
 Map `(issuer, subject)` to an internal user UUID. Derive `owner_id` from the validated identity, never from client data. All repository queries for documents, jobs, sources, retries, uploads, and downloads include owner constraints. Return a uniform `404` for nonexistent and inaccessible resource IDs. Administrative operations require separate scopes and do not grant routine access to document content.
 
-Attach owner and document/version IDs to Chroma records. Apply owner + selected-ready-document filters before retrieval and verify returned metadata against the authorized set. Cache keys include owner, document versions, index fingerprint, and normalized query/configuration. Recheck current authorization and deletion state before serving any cached/result payload. Avoid globally shared per-user Streamlit caches. Keep secrets/tokens out of logs, URLs, rendered content, and durable job payloads.
+Attach owner and document/version IDs to Chroma records. Apply owner + selected-ready-document/version/published-attempt filters before retrieval and verify returned metadata against the authorized set. Cache keys include owner, document versions, index fingerprint, and normalized query/configuration. Recheck current authorization and deletion state before serving any cached/result payload. Avoid globally shared per-user Streamlit caches. Keep secrets/tokens out of logs, URLs, rendered content, and durable job payloads.
 
 ## 3. PostgreSQL and object storage
 
@@ -54,7 +62,7 @@ Proposed tables:
 
 - `users`: internal ID, issuer, subject, active state; unique `(issuer, subject)`.
 - `documents`: ID, owner ID, original filename, private immutable object key/version ID, verified size, SHA-256, page/textless-page/chunk counts, status, active version, index fingerprint, error code, timestamps; unique `(owner_id, sha256)` for live documents.
-- `document_versions`: immutable version/index identity, expected chunk count, artifact references, publication state.
+- `document_versions`: immutable version/index identity, published attempt namespace, expected chunk count, artifact references, publication state.
 - `jobs`: ID, owner ID, type, document/version references, bounded control metadata and payload object reference, state, idempotency key/hash, deadline, attempt count, lease token/expiry, heartbeat, result/error reference, timestamps.
 - `outbox`: event ID, job ID, publication state, retry timestamps; committed with job creation.
 - `idempotency_receipts`: owner, endpoint, key, request hash, job/resource reference, and expiry; kept separately from expiring result payloads so payload cleanup cannot turn a safe retry into duplicate work.
@@ -81,8 +89,12 @@ Object keys use generated owner/document/version IDs; user filenames are display
 5. Ingestion workers claim job attempts with database leases. Parse PDFs in restricted subprocesses/containers with CPU, memory, time, file-size, and network limits. Validate actual PDF content, encryption, page count, total extracted text, and supported scope.
 6. Extract page-level text, preserving original 1-based PDF indices including blank-page gaps. Make deterministic page-bounded overlapping chunks with guaranteed progress.
 7. Embed bounded batches using the pinned embedding identity and dedicated embedding capacity. Disable silent truncation; fail clearly for unsupported input size.
-8. Upsert deterministic versioned chunk IDs to Chroma. Verify expected records, then atomically publish the ready version in PostgreSQL, guarded by attempt lease/version and document not-deleting state.
+8. Upsert deterministic chunk IDs within a fresh attempt-specific namespace, including owner/document/version/attempt identity in every record. Verify records, then atomically publish the exact winning attempt namespace in PostgreSQL, guarded by the current lease/version and document not-deleting state. Retrieval accepts only that published attempt; a previous attempt cannot overwrite the winner's records.
 9. Failure/retry never exposes partial indexes. Reconciler cleans orphan versions/objects and detects stalled jobs. Retry transient failures with capped exponential backoff/jitter; invalid files fail permanently with useful messages.
+
+### Attempt-isolated external writes
+
+Every new lease acquisition receives a fresh attempt namespace, even when retrying the same document version. Workers can write/delete only their own namespace; cleanup of an old attempt never uses a broad document/version filter that could remove a winner. PostgreSQL fencing alone cannot fence an already-running external Chroma call. Publish the verified attempt pointer atomically, and filter retrieval against it. Expired/cancelled attempts remain unsearchable, and reconciliation repeatedly sweeps their vectors/artifacts after old workers terminate or lose write access. Do not declare physical cleanup complete while a stale writer can recreate objects. Test a paused attempt that resumes writes and cleanup after its retry has successfully published. Apply equivalent attempt isolation to result/artifact object keys.
 
 ### Immutable upload acceptance
 
@@ -98,7 +110,7 @@ PostgreSQL is authoritative for acceptance, progress, and results. Broker delive
 
 Reconcile jobs against outbox/broker/leases to recover missed or duplicate delivery. Cancellation and expiration are durable state changes. Deletion marks related jobs cancelling and prevents their publication. Completed answers may be retried internally, but only one current authorized result is published for a job. Idempotency keys are owner+endpoint scoped with request hashes; reusing a key with a different body returns conflict. Keep idempotency metadata at least as long as the documented client retry horizon.
 
-Inference routers track healthy warmed endpoint inventories and per-instance concurrency/memory budgets. Keep embedding and generation pools separate. Distributed admission counters/leases enforce measured capacity across answer workers; local semaphores alone are insufficient. Redis loss fails new admission closed or returns `503`, while PostgreSQL preserves accepted jobs. Queues have maximum depth/age and per-user fair-share limits. Return `429` with `Retry-After` or `503` when budgets are exhausted; no unbounded waiting and no performance claim based on rejection-only throughput.
+Inference routers track healthy warmed endpoint inventories and per-instance concurrency/memory budgets. Keep embedding and generation pools separate. Within embeddings, reserve query capacity independently from bulk ingestion: use separate endpoint pools in production or a bounded priority/fair scheduler with guaranteed query slots and capped ingestion batches. Queue separation alone does not reserve model capacity. Locally one shared endpoint is allowed with one global model-operation slot and separate query/ingestion queues; queries run at batch boundaries, with starvation protection in both directions. No local model concurrency or latency promise is inferred from the production topology. Distributed admission counters/leases enforce measured capacity across answer workers; local semaphores alone are insufficient. Redis loss fails new admission closed or returns `503`, while PostgreSQL preserves accepted jobs. Queues have maximum depth/age and per-user fair-share limits. Return `429` with `Retry-After` or `503` when budgets are exhausted; no unbounded waiting and no performance claim based on rejection-only throughput.
 
 ## 6. Retrieval and grounded answers
 
@@ -114,9 +126,9 @@ Before publishing and before serving results, recheck user/document status. Dele
 
 Deletion uses an idempotent operation ID. First append a minimal deletion intent to an encrypted append-only recovery journal in an independently protected object-storage account/bucket or equivalent service, outside the application database backup/rollback boundary. Confirm durable journal persistence before acknowledging deletion. Then a PostgreSQL transaction tombstones the owner-scoped document, invalidates versions, cancels related jobs, and records an outbox cleanup job; return `202` only after both steps succeed. If journal persistence fails, return a retryable error without claiming acceptance. If journal persistence succeeds but the database transaction fails, retain/reconcile the intent and conservatively apply it during recovery; repeating the same operation must be safe. New list/retrieval/download/result reads exclude it immediately. A bounded in-flight response that crossed the final authorization check before deletion may finish; deletion cannot retract bytes already sent or previously issued signed URLs. Document this boundary explicitly.
 
-Cleanup workers remove PDF/artifact objects, vector versions, affected saved answers/excerpts, and cache entries; retries and deletion status remain visible. Stale ingestion/answer workers cannot republish deleted data because publication is guarded by current database state and attempt/version tokens. Keep minimal tombstones until all live stores, replicas, caches, and applicable backup retention windows are covered.
+Cleanup workers explicitly remove applicable object version IDs, noncurrent versions and abandoned multipart uploads (a delete marker alone is insufficient), attempt-specific artifacts, vector versions, affected saved answers/excerpts, and cache entries; retries and deletion status remain visible. Stale ingestion/answer workers cannot republish deleted data because publication is guarded by current database state and attempt/version tokens. Keep minimal tombstones until all live stores, replicas, caches, and applicable backup retention windows are covered.
 
-Proposed defaults: request/result payloads 24 hours, abandoned uploads 1 hour, sanitized operational logs/audit events 30 days, encrypted backups 30 days; retained document originals persist until user deletion. Finalize these before release. Backups are not instantly erased on a delete: disclose expiry policy, restrict access, and reapply tombstones before any restored environment is served. Document metadata can be minimized after cleanup while retaining the deletion ledger needed to prevent resurrection.
+Retain input payloads until their job is terminal and the required retry/recovery grace ends; a creation-time object lifecycle must not erase queued/running inputs. Proposed defaults: terminal result payloads 24 hours after completion, abandoned uploads 1 hour, sanitized operational logs/audit events 30 days, encrypted backups 30 days; retained document originals persist until user deletion. Finalize these before release. Backups are not instantly erased on a delete: disclose expiry policy, restrict access, and reapply tombstones before any restored environment is served. Document metadata can be minimized after cleanup while retaining the deletion ledger needed to prevent resurrection.
 
 ### Independent deletion journal and restore gate
 
@@ -171,6 +183,8 @@ Release through CI checks -> immutable images/scans -> isolated staging -> migra
 
 Automate immutable-upload overwrite/completion races, owner-scoped job rediscovery after full session loss, pre-deletion-backup restore with newer journal replay, high-volume payload expiry/idempotency retention, owner isolation, version filtering, pagination/idempotency, duplicate delivery, lease fencing, worker death, object/vector partial failure, deleting-during-generation, token expiry/key rotation, and migration compatibility tests. Use temporary object/vector namespaces and separate real service databases. Run browser/WebSocket tests for Streamlit; API-only tests do not prove the UI path.
 
-Before release resolve workload mix/SLOs, corpus/session sizes, hosting/GPU budget, identity provider, object-storage provider, exact Chroma topology, retention, and measured autoscaling thresholds. Preserve main-stack choices unless the owner approves a change after evidence. This document supersedes the in-process queue, process-local locks, local-only uploads, and single-worker architecture from version 1.
+Before production certification resolve workload mix/SLOs, corpus/session sizes, hosting/GPU budget, identity provider, object-storage provider, exact Chroma topology, retention, and measured autoscaling thresholds. Preserve main-stack choices unless the owner approves a change after evidence. This document supersedes the in-process queue, process-local locks, local-only uploads, and single-worker architecture from version 1.
+
+Local evidence and later production evidence are tracked separately in [DOCUMENTATION_REVIEW.md](DOCUMENTATION_REVIEW.md). Local fakes test orchestration, failure handling and contracts, not model quality; local single-node restore/replica simulations do not prove real multi-node HA. Final operational procedures are defined in [DEPLOYMENT_GUIDE.md](DEPLOYMENT_GUIDE.md).
 
 Official design references: [Streamlit auth](https://docs.streamlit.io/develop/concepts/connections/authentication), [Streamlit replication](https://docs.streamlit.io/develop/concepts/architecture/architecture), [Chroma distributed architecture](https://docs.trychroma.com/reference/architecture/distributed), [Celery task semantics](https://docs.celeryq.dev/en/stable/userguide/tasks.html), [PostgreSQL backup methods](https://www.postgresql.org/docs/current/backup.html), and [Kubernetes autoscaling](https://kubernetes.io/docs/concepts/workloads/autoscaling/horizontal-pod-autoscale/). These inform the proposal; compatibility/capacity still need implementation verification.
