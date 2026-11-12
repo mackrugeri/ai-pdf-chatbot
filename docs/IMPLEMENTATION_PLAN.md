@@ -1,122 +1,51 @@
-# Implementation Plan: Local Portfolio to GPU Deployment
+# Implementation Plan
 
-Status: planned work; no implementation milestone completed by this document
-Version: 3.0
-Date: 2026-11-13
+Version 4.0 | 2026-11-13 | Planned work; nothing marked implemented by documentation
 
-## 1. Scope and milestones
+## 1. Working scope
 
-Build the production-oriented architecture locally without a dedicated GPU. Preserve Python, Ollama, Qwen3 4B, LlamaIndex, ChromaDB, FastAPI, Streamlit and PostgreSQL. No GPU hardware, production cluster, provider purchase, or 5,000-RPS benchmark is required to start development or complete the portfolio engineering milestone.
+Implement the [PRD](PRD.md) against the [technical design](TECHNICAL_DESIGN.md) and fixed [stack](TECH_STACK.md). Local development requires no dedicated GPU. Start with deterministic tests and staged single-instance services, then optional real CPU/native Ollama. Preserve the production interfaces and correctness; do not replace durable jobs/auth with throwaway local-only shortcuts.
 
-Follow [PRD.md](PRD.md), [TECHNICAL_DESIGN.md](TECHNICAL_DESIGN.md), [LOCAL_DEVELOPMENT.md](LOCAL_DEVELOPMENT.md), and [DECISION_LOG.md](DECISION_LOG.md). The former 15-day roadmap is superseded; estimate work after the local foundation spike. Contracts remain the same across environments; settings, service placement and replica/resource budgets change.
+The first deliverable is a reproducible local portfolio project. Later deployment files/CI/CD/Terraform/GPU resource configuration are added when staging/production is needed. Actual production readiness/HA/RPS proof is a separate later milestone, not a prerequisite for coding. No fixed 15-day promise, cloud provisioning or infrastructure spending is authorized.
 
-- **A: local portfolio implementation:** working local application, real storage/job/auth boundaries, automated tests, honest model evidence, and permitted-data demo.
-- **B: deployment preparation:** immutable images, local integration setup, GPU/Kubernetes manifests, configuration map, and runbooks authored/validated without provisioning hardware. Real GPU checks remain explicitly pending.
-- **C: production verification:** future representative infrastructure, semantic/capacity/fault/HA/restore checks and environment-specific release decision. Not a prerequisite for A or authoring B.
+## 2. Ordered milestones
 
-Nothing here authorizes infrastructure spending or a production launch. Planning/checklists do not establish that code, tests, manifests or benchmarks already exist.
+| Step | Implementation work | Completion check |
+| --- | --- | --- |
+| 1. Foundation | Python/uv lock, modules, typed settings, safe examples/ignores, API schemas/errors/probes, adapter interfaces, Ruff/pytest; verify package/platform compatibility and licenses. | Clean environment runs skeleton and unit tests; no hardcoded hardware/addresses or leaked secrets. |
+| 2. Local services and identity | Incremental Docker/Compose profiles for PostgreSQL/RabbitMQ/Redis/Chroma/private S3-compatible service; local OIDC provider, actual API-audience access tokens, ownership mapping; migrations/bounded pools. | Authenticated UI/API vertical slice and real local service tests; wrong-owner/expired/forged tokens rejected. Production config rejects fakes/test defaults. |
+| 3. PDF ingestion input | Quota reservations, owner duplicates/idempotency, version-pinned verified staging, immutable final promotion, parser isolation, page-aware chunks/counts and source metadata. | Invalid/over-limit/encrypted/textless cases fail; URL overwrite/duplicate/crash tests preserve exact accepted bytes/page numbers and clean orphans. |
+| 4. Durable indexing | Job/receipt/outbox schema, publisher confirms, separate workers, attempt leases/heartbeats/deadlines/retries, actual broker adapter and bounded embeddings. | API/worker/broker crashes and duplicate delivery recover accepted jobs; incomplete/loser attempts stay invisible. |
+| 5. Attempt-safe vectors | Attempt-specific Chroma/artifact namespaces, verified counts and atomic winner pointer, version/fingerprint checks, scoped reconciler cleanup. | A paused loser resuming writes/cleanup cannot mutate/delete winner data; no broad cleanup races. |
+| 6. Retrieval and answering | Owner/selected-version/attempt filtering, query-embedding reservations/fair local scheduling, full-prompt budgets, model adapters, grounded structured answers/citations, abstention/format repair. | Fakes test orchestration; opt-in actual Qwen3/Nomic runs separately establish semantic evidence. Ingestion flood cannot consume all query capacity. |
+| 7. Results, UI and lifecycle | Encrypted result objects, recent paginated jobs/detail, bounded polling/reconnect, safe source display, cancel/retry controls, terminal retention, active-input safety and separate receipts. | Empty-session reconnect restores owner jobs; cursor/expiry/user-isolation tests pass; expiry does not resubmit work or erase active inputs. |
+| 8. Deletion and recovery | Journal-first intents, tombstones/cancellation, version/attempt/file/result/cache cleanup, protected replay/checkpoints, writer fencing and closed restore. | Deleting during generation/retry cannot republish; restoring an older backup replays newer deletions; missing journal fails closed. Local independence limits are documented. |
+| 9. Portfolio completion | Verified startup/test/reset commands, permitted fixtures/demo, architecture diagram, test results, actual model/config identity and honest evidence status. | Reproducible local project; separate fake/real evidence; no unsupported production-capacity claim. |
 
-## 2. Phase 0: Local feasibility and contracts (A)
+Start each service only when needed; keep optional full monitoring/HA profiles off by default. Local real inference uses one global operation slot and conservative context/batches; a fake adapter is explicit, not an automatic fallback. If real models cannot run locally, the software work can continue but real-quality evidence stays pending.
 
-- [ ] Record confirmed choices, local constraints, proposed supporting services and future production decisions in the decision log.
-- [ ] Verify supported Python/dependency compatibility and licensing; create a small resource inventory without assuming a dedicated GPU.
-- [ ] Spike Ollama adapter protocol with deterministic fakes first; optionally test real CPU/native Qwen3/Nomic if resources permit.
-- [ ] Select a local OIDC provider and a local S3-compatible service that pass the needed auth/versioning/checksum/policy contracts.
-- [ ] Define small local fixtures, one-model-operation scheduling, low local workload limits and mode labeling.
-- [ ] Write storage/job/model interfaces and configuration contracts before domain logic; keep auth/ownership enabled in local integration.
+## 3. Required verification
 
-Exit: local implementation can begin with no cloud/GPU prerequisites. Future GPU benchmarks, provider selection and production SLO/budget decisions are tracked, not treated as blockers to A.
+- Unit/contract tests: validation, chunking/page gaps, state transitions, source markers, structured model errors and fake/Ollama interface parity.
+- Real local integration: database migrations/ownership, object versions/checksums/policies, broker/outbox/retries, Redis admission, Chroma filtering/attempt isolation and actual OIDC login/token validation.
+- Lifecycle/fault tests: duplicate/completion/idempotency races, stale workers, timeout with unknown execution, cancellation/deletion, session loss, payload expiry, journal/DB partial failure, restore and cleanup.
+- Actual-model quality: keep tuning separate from a frozen 100-case set (80 answerable/20 unsupported); targets from PRD apply only to real runs. Record not-run/skipped checks honestly.
+- Security/privacy: no cross-user results, unsafe HTML or content/credential logging; isolated destructive test stores, bounded parser/model/network resources, no unguarded test identities in production.
 
-## 3. Phase 1: Foundation, identity and services (A)
+Commit coherent changes with meaningful tests. Keep tests fake by default and real-model checks opt-in; tests cannot silently download models or call paid APIs. Update the relevant contract when implementation changes a design decision, rather than adding another overlapping document.
 
-- [ ] Create Python project, uv lockfile, modules, Ruff/pytest, typed settings, safe `.env.example`, `.gitignore`, and verified README commands.
-- [ ] Add API versioning, errors/request IDs, schemas, readiness/liveness and dependency injection.
-- [ ] Implement deterministic and Ollama model adapters behind the same ports; production rejects fake/test configurations.
-- [ ] Add incrementally runnable Compose profiles and API/UI/worker images; no CUDA/GPU requirement in the default local profile.
-- [ ] Implement local OIDC login/access-token integration, independent API token validation, user/owner mapping, expiry/logout/deactivation tests.
-- [ ] Add PostgreSQL schema/versioned SQL migrations, bounded pools, isolated test database and object-store adapter.
-- [ ] Add baseline sanitized metrics/logging; keep full monitoring optional locally.
+## 4. Later staging/production milestone
 
-Exit: reproducible authenticated local skeleton; malformed/wrong-audience credentials and cross-user access fail; no secret/content leakage. Covers FR-05, NFR-02/NFR-05/NFR-10.
+When resources are available, choose workload/SLOs, provider/region/GPU budget, production OIDC/object/journal and supported Chroma topology. Author/verify GitHub Actions deployment stages, Terraform, target-platform Docker images and Kubernetes/Helm configuration; keep hardware/network/resource settings out of business logic.
 
-## 4. Phase 2: Immutable uploads and PDF extraction (A)
+Preload pinned models, verify actual GPU execution and separate query/ingestion capacity, run the same correctness/auth suites, then real-model parity/quality, database/broker/storage HA, restore/rollback and actual load tests. Use schema expand/contract and versioned indexes for rollback. Set monitoring/alerts/runbooks and an operational owner before release.
 
-- [ ] Implement owner-scoped uploads, quota reservation/release, verified version-pinned staging and server-only immutable final promotion.
-- [ ] Add duplicate/completion idempotency and crash/orphan cleanup; test overwrite during/after completion and pinned downloads.
-- [ ] Parse in resource-limited network-disabled subprocesses; reject invalid/encrypted/textless/over-limit PDFs and report mixed-page gaps.
-- [ ] Create deterministic page-bounded chunks preserving PDF page indices and source ownership.
-- [ ] Test Unicode/blank/long pages, malicious filenames, size limits, duplicate owners, abandoned uploads and wrong-owner IDs.
+Report offered/admitted/completed RPS separately, including browser/polling overhead, latency, queues, token rates, retention costs and failure recovery. Measure representative 1,000–5,000 RPS profiles only on suitable resources. No GPU benchmark, HA guarantee, RPO/RTO or throughput claim is earned by a diagram, local fake test or authored manifest.
 
-Exit: accepted immutable bytes are traceable and private, with bounded resource use. Covers FR-01/FR-03/FR-07/FR-12.
+## 5. Decisions and current status
 
-## 5. Phase 3: Durable jobs and attempt-safe indexing (A)
+Fixed now: main stack/PostgreSQL, private ownership, durable jobs/outbox, immutable uploads, attempt-safe vectors, grounded citations, query scheduling, journal-protected recovery and hardware-neutral adapters.
 
-- [ ] Implement PostgreSQL jobs/idempotency receipts/outbox and real RabbitMQ integration with confirmed publication.
-- [ ] Separate ingestion/answer/cleanup workers and add leases, heartbeat, fencing, deadlines, cancellation, retries and reconciliation.
-- [ ] Store bounded control rows and object payload references; retain active inputs through recovery grace.
-- [ ] Implement real/fake embeddings in separate model/index namespaces; verify dimensions, identity and no silent truncation.
-- [ ] Write Chroma records/artifacts into new attempt-specific namespaces; atomically publish only the winning verified attempt pointer.
-- [ ] Restrict stale-attempt cleanup to its own namespace; test a paused loser resuming writes/cleanup after its retry has published.
-- [ ] Test broker/API/worker crashes, duplicate delivery, partial vectors, lease expiry and schema/index compatibility.
+Resolve during foundation: tested versions, local OIDC/object service compatibility, exact configuration/startup commands and migration/index/idempotency constraints. Resolve at deployment: providers/resources, production SLO/budget, supported Chroma topology, HA/retention and capacity. These future choices do not block local implementation.
 
-Exit: accepted local jobs survive restart, partial/loser indexes stay invisible, and stale workers cannot mutate/delete winning data. Covers FR-02/FR-04, NFR-04.
-
-## 6. Phase 4: Authorized retrieval and answers (A)
-
-- [ ] Filter by owner, selected ready version and published attempt before retrieval; verify all returned metadata.
-- [ ] Implement query versus ingestion embedding queues with a guaranteed query share and bounded fairness. Locally serialize shared model work; production can map the same classes to reserved endpoint pools.
-- [ ] Build full-prompt budgets, untrusted-source delimiters, structured answers/citation validation, abstention and bounded repair.
-- [ ] Persist short-lived encrypted result payloads; authorize at publication/read and invalidate whole answers referencing deleted sources.
-- [ ] Implement paginated owner-scoped job discovery/detail with cursor integrity, expiry and complete-session-loss tests.
-- [ ] Add terminal-history retention/partition strategy and independent receipt retention; never drop active jobs/inputs or convert expired retries into new work.
-- [ ] Keep input/result TTL, quotas, schema/index/WAL costs and cleanup metrics measured at local scale; future capacity sizing remains separate.
-
-Exit: safe orchestration works with fakes; opt-in real-model runs provide separately recorded semantic evidence. Covers FR-05 through FR-08/FR-10/FR-11 and NFR-09/NFR-10.
-
-## 7. Phase 5: Deletion, UI and local recovery (A)
-
-- [ ] Implement journal-first deletion with independently modeled local namespace/credentials, database tombstones/outbox and partial-failure reconciliation.
-- [ ] Prevent stale publication; delete applicable object versions, result payloads, multipart remnants, attempt vectors and caches through retryable cleanup.
-- [ ] Implement closed-access restore and journal replay/checkpoints; test a backup older than acknowledged deletion and missing-journal failure.
-- [ ] Build Streamlit sign-in/upload/status/selection/chat/source/retry/cancel/delete views with safe rendering, mode labels and bounded polling.
-- [ ] Restore recent jobs from the API after empty-session reconnect; verify token expiry/deactivation/logout and user cache isolation.
-- [ ] Exercise ingestion flood versus query scheduling, deletion-during-generation, local replica loss, retention and idempotency expiry.
-
-Exit: reproducible full local workflow and fault checks pass. A local journal on the same disk simulates the independent contract; laptop-loss durability is not claimed. Covers FR-08/FR-09/FR-12/FR-13.
-
-## 8. Phase 6: Portfolio handoff and deployment artifacts (A + B)
-
-- [ ] Record actual local test results, permitted-data demo, architecture diagrams, model/configuration identity, limitations and evidence labels.
-- [ ] Create a tuning set plus frozen 100-case semantic release set; only actual-model runs count toward the PRD quality target. Record not-run tests honestly.
-- [ ] Document verified startup/test/reset/backup commands, estimated local footprint and host/container troubleshooting; do not publish nonexistent setup instructions.
-- [ ] Build target-platform images and author/render Helm/Kubernetes templates, resource settings, GPU/runtime/model warmup, ingress affinity/TLS and private network/secrets rules.
-- [ ] Add CI lint/tests/integration/image checks and staging/migration/canary/rollback workflow definitions; run only resource-available stages, with pending external stages visible.
-- [ ] Author dashboards/runbooks and migration/restore/retention procedures; rehearse feasible single-machine cases.
-- [ ] Publish a portfolio evidence report distinguishing implemented/tested, authored/unverified and future production-only work.
-
-Exit A: local engineering deliverable works and is reproducible. Exit B: deployment artifacts and contracts are prepared with unverified GPU/HA/capacity work explicitly listed. Neither permits an achieved 5,000-RPS claim.
-
-## 9. Phase 7: Future GPU staging (C, when resources exist)
-
-- [ ] Finalize workload, token lengths, corpus/session/upload sizes, SLOs, provider/region, identity, Chroma topology, retention, budget and operational ownership.
-- [ ] Provision isolated resources only when authorized; verify GPU drivers/runtime, native dependency/platform compatibility and actual model device use.
-- [ ] Configure private real Ollama endpoint inventory, warmup, safe concurrency and reserved query embedding capacity; forbid local/fake defaults.
-- [ ] Run the same auth/upload/job/deletion/reconnect suites and real-model parity/quality evaluation.
-- [ ] Verify database/broker/Redis/object/vector HA/recovery, independent journal durability, current-ledger restore and writer fencing.
-- [ ] Exercise immutable release/migration/canary/rollback and production observability/secret rotation.
-
-Exit: deployment works on representative hardware; code changes should be isolated to demonstrated compatibility/performance gaps, not wholesale domain rewrites. Model/index changes require explicit evaluation/migration.
-
-## 10. Phase 8: Future production capacity and release (C)
-
-- [ ] Benchmark components and real GPU token throughput before replica sizing.
-- [ ] Run the workload profiles in [CAPACITY_PLAN.md](CAPACITY_PLAN.md), separating submissions, completed answers, polling and cache hits.
-- [ ] Measure target-rate sustained/soak/burst/fault tests, queue stability, latency, isolation, answer quality, storage/WAL/backup costs and retention cleanup.
-- [ ] Meet declared production SLOs, semantic targets and measured RPO/RTO; do not infer HA/capacity from manifests, mocks or a laptop test.
-- [ ] Approve release for a specific environment; record achieved profiles or unresolved blockers and avoid unsupported portfolio claims.
-
-Exit C: production-readiness and capacity assertions are backed by actual evidence. Deferring C for lack of hardware does not invalidate A/B.
-
-## 11. Commit and testing strategy
-
-Commit coherent implementation steps and their meaningful tests together. Unit tests use fakes; integration tests use isolated real local services; actual-model tests are opt-in and clearly labeled; target-rate/HA tests run later on representative resources. Keep application/domain logic independent of hardware, vendor SDKs and deployment addresses through narrow adapters, without building unnecessary microservices. Re-run affected checks when code/contracts change; re-evaluate model/index/topology changes before related claims.
+Current evidence: documentation reviewed; no application implementation, installation, real-model demo, deployment or performance test has been executed in this documentation task. Next checkpoint is the tested authenticated local vertical slice, not more overlapping planning files.
