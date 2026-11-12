@@ -1,163 +1,154 @@
 # Technical Design Document: AI PDF Chatbot
 
-Status: implementation baseline, version 1.0
-Date: 2026-11-12
-Requirements: [PRD.md](PRD.md)
-Technology rationale: [TECH_STACK.md](TECH_STACK.md)
+Status: production architecture baseline; not implemented or load-certified
+Version: 2.0
+Date: 2026-11-13
 
-## 1. Design approach
+Requirements: [PRD.md](PRD.md). Choices: [TECH_STACK.md](TECH_STACK.md). Sizing: [CAPACITY_PLAN.md](CAPACITY_PLAN.md). Delivery: [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md).
 
-Main stack: **Python, Ollama, Qwen3 4B, LlamaIndex, ChromaDB, FastAPI, Streamlit**. Supporting dependencies and tools are detailed in [TECH_STACK.md](TECH_STACK.md).
+## 1. Architecture and boundaries
 
-Use a Streamlit UI backed by a single FastAPI process. Keep PDF extraction, embeddings, retrieval, generation, and persistence behind separate service interfaces. PostgreSQL owns document lifecycle state; ChromaDB stores chunk text, vectors, and source metadata; the filesystem stores uploaded PDFs. Ollama provides local embedding and generation models. LlamaIndex coordinates chunking/retrieval adapters without owning a second authoritative metadata database.
+Main stack: **Python, Ollama, Qwen3 4B, LlamaIndex, ChromaDB, FastAPI, Streamlit**. PostgreSQL owns application metadata. Target traffic is 1,000–5,000 RPS; exact endpoint mix and inference SLOs are unresolved. This architecture provides scale boundaries, not a claim that a particular deployment sustains the target.
 
 ```text
-Streamlit -> FastAPI -> Document service -> PDF extraction -> Chunking
-                    |                                      -> Ollama embeddings
-                    |                                      -> ChromaDB
-                    |                -> PostgreSQL + local PDF files
-                    |
-                    -> Answer service -> selected ready IDs -> ChromaDB retrieval
-                                      -> bounded excerpts -> Ollama generation
-                                      -> citation validation -> response
+Browser -> TLS ingress / rate limits
+                |
+                +-> Streamlit replicas (WebSockets + session affinity)
+                |        -> authenticated server-to-server API calls
+                +-> FastAPI replicas (stateless authenticated API)
+                           |
+                           +-> PostgreSQL + connection pooler
+                           |     ownership, documents, jobs/results, outbox
+                           +-> Redis (quotas, admission, bounded caches)
+                           +-> private object storage (PDFs/artifacts)
+                           +-> transactional outbox -> RabbitMQ
+                                                        |
+                   +------------------------------------+
+                   v                  v                  v
+             ingestion workers   answer workers    cleanup workers
+                   |                  |
+             sandboxed PDF       authorized retrieval -> Chroma service
+             parse/chunk              -> inference router -> Ollama GPU pool
+                   |                                            (Qwen3 4B)
+                   +-> embedding router -> Ollama embedding pool
+                   +-> versioned Chroma records
+
+All services -> sanitized metrics/logs/traces -> operational monitoring
 ```
 
-Backend is the sole storage owner. UI never reads PostgreSQL, ChromaDB, or uploaded files directly. Use one backend worker; in-process jobs and coordination locks are not designed here for multiple API workers.
+API/UI processes do not run ingestion or model generation. Queue messages carry job IDs, not PDF text or tokens. Workers read job ownership and payload from PostgreSQL. UI never accesses application databases or inference endpoints directly. Durable authoritative files live in object storage, not replica-local paths. Chroma runs as a separately operated service with a validated deployment topology, not an embedded index copied into each API pod.
 
-## 2. Configuration and initial limits
+## 2. Authentication and authorization
 
-All values below are planned starting defaults, adjustable after measurement, not verified model or library specifications.
+Integrate an OIDC provider capable of issuing access tokens for the FastAPI audience. Streamlit authenticates the user and obtains that access token server-side through a supported tested flow. FastAPI independently validates signature, allowed algorithm, issuer, audience, expiry, and required scopes using bounded/cached JWKS retrieval and key rotation handling. An ID token or an unsigned owner header is not an API credential. Select and verify the actual provider/refresh/logout behavior before release; auth integration is a blocking milestone.
 
-| Setting | Initial value |
+Map `(issuer, subject)` to an internal user UUID. Derive `owner_id` from the validated identity, never from client data. All repository queries for documents, jobs, sources, retries, uploads, and downloads include owner constraints. Return a uniform `404` for nonexistent and inaccessible resource IDs. Administrative operations require separate scopes and do not grant routine access to document content.
+
+Attach owner and document/version IDs to Chroma records. Apply owner + selected-ready-document filters before retrieval and verify returned metadata against the authorized set. Cache keys include owner, document versions, index fingerprint, and normalized query/configuration. Recheck current authorization and deletion state before serving any cached/result payload. Avoid globally shared per-user Streamlit caches. Keep secrets/tokens out of logs, URLs, rendered content, and durable job payloads.
+
+## 3. PostgreSQL and object storage
+
+Use PostgreSQL with Psycopg 3, bounded pools, and a measured PgBouncer connection budget across all replicas and workers. Use parameterized SQL and short transactions. Never hold database locks/connections across parsing, vector calls, or inference. Apply explicit versioned SQL migrations via a controlled release job, with backward-compatible expand/contract changes. Use a separate test database and least-privilege application/migration/backup roles.
+
+Proposed tables:
+
+- `users`: internal ID, issuer, subject, active state; unique `(issuer, subject)`.
+- `documents`: ID, owner ID, original filename, private object key, SHA-256, page/textless-page/chunk counts, status, active version, index fingerprint, error code, timestamps; unique `(owner_id, sha256)` for live documents.
+- `document_versions`: immutable version/index identity, expected chunk count, artifact references, publication state.
+- `jobs`: ID, owner ID, type, document/version references, bounded payload, state, idempotency key/hash, deadline, attempt count, lease token/expiry, heartbeat, result/error reference, timestamps.
+- `outbox`: event ID, job ID, publication state, retry timestamps; committed with job creation.
+- `audit_events` and `deletion_tombstones`: minimal actor/action/resource/time metadata, without excerpts or questions.
+
+Index owner/time listing, job state/deadline, outbox publication, and ownership/reference lookups. Use keyset pagination; avoid unbounded result lists. Benchmark job/result write amplification and retention cleanup.
+
+Object keys use generated owner/document/version IDs; user filenames are display-only. Keep a private staging prefix, final PDF objects, and optional extracted-text artifacts. Enforce encryption at rest, private access, bounded short-lived signed URLs, checksums, and lifecycle cleanup of abandoned uploads. Signed URLs are not revocable after issuance: set short TTLs and authorize issuance; no object key is a substitute for ownership checks.
+
+## 4. Upload and ingestion protocol
+
+1. Authenticated client initiates an upload with size/name metadata and idempotency key. API reserves quota and creates a pending owner-scoped document/upload record.
+2. Return a bounded upload target. The Streamlit server streams bytes to private object storage without retaining the full file in its own long-lived state. Prototype direct-to-object browser uploads only if compatible with the selected Streamlit flow; do not assume this exists automatically.
+3. Complete-upload verifies stored size/checksum and schedules a durable job in the same PostgreSQL transaction as an outbox event. Byte-identical owner duplicates return the existing document; delete abandoned objects and release reservations.
+4. Outbox publishers send persistent job IDs with broker publisher confirms and then mark published. A crash between publish and marking can duplicate delivery; workers must be idempotent.
+5. Ingestion workers claim job attempts with database leases. Parse PDFs in restricted subprocesses/containers with CPU, memory, time, file-size, and network limits. Validate actual PDF content, encryption, page count, total extracted text, and supported scope.
+6. Extract page-level text, preserving original 1-based PDF indices including blank-page gaps. Make deterministic page-bounded overlapping chunks with guaranteed progress.
+7. Embed bounded batches using the pinned embedding identity and dedicated embedding capacity. Disable silent truncation; fail clearly for unsupported input size.
+8. Upsert deterministic versioned chunk IDs to Chroma. Verify expected records, then atomically publish the ready version in PostgreSQL, guarded by attempt lease/version and document not-deleting state.
+9. Failure/retry never exposes partial indexes. Reconciler cleans orphan versions/objects and detects stalled jobs. Retry transient failures with capped exponential backoff/jitter; invalid files fail permanently with useful messages.
+
+Initial limits retained for testing: 20 MiB/file, 300 pages/file, 2 million extracted characters, 2,000 question characters, and 10 selected documents. They are service defaults, not a capacity promise. Tenant storage/upload/job quotas and global queue budgets must be selected from the capacity model before release.
+
+## 5. Durable jobs and inference scheduling
+
+Use Celery with RabbitMQ durable quorum queues, publisher confirms, persistent messages, tested late acknowledgments, bounded prefetch, and capped retries. Separate ingestion, answer, and cleanup queues so a large PDF workload does not starve answers or deletion. Validate broker/client behavior for chosen versions. JSON-only messages; never accept arbitrary serialized tasks from untrusted networks.
+
+PostgreSQL is authoritative for acceptance, progress, and results. Broker delivery is at least once, not exactly once. Workers use atomic lease/attempt tokens; duplicate or stale attempts cannot publish results or ready indexes. Heartbeat and cancellation checks occur between expensive steps. If an inference request times out with execution state unknown, quarantine its capacity slot until the old request is confirmed finished or its endpoint is reset; do not blindly retry and double-load the GPU.
+
+Reconcile jobs against outbox/broker/leases to recover missed or duplicate delivery. Cancellation and expiration are durable state changes. Deletion marks related jobs cancelling and prevents their publication. Completed answers may be retried internally, but only one current authorized result is published for a job. Idempotency keys are owner+endpoint scoped with request hashes; reusing a key with a different body returns conflict. Keep idempotency metadata at least as long as the documented client retry horizon.
+
+Inference routers track healthy warmed endpoint inventories and per-instance concurrency/memory budgets. Keep embedding and generation pools separate. Distributed admission counters/leases enforce measured capacity across answer workers; local semaphores alone are insufficient. Redis loss fails new admission closed or returns `503`, while PostgreSQL preserves accepted jobs. Queues have maximum depth/age and per-user fair-share limits. Return `429` with `Retry-After` or `503` when budgets are exhausted; no unbounded waiting and no performance claim based on rejection-only throughput.
+
+## 6. Retrieval and grounded answers
+
+Answer worker resolves current owner access and document ready versions before retrieval. Empty selection never means all documents. Embed the question, retrieve up to six filtered candidates initially, and revalidate source ownership/version. Assemble delimited untrusted excerpts labeled `S1`, `S2`, etc. Start with page chunks of roughly 1,200 characters with 200 overlap and a 4,000-character context cap; measure/tune with versioned indexes.
+
+Use the pinned model tokenizer or a tested conservative full-prompt token budget check; character caps alone do not bound tokens. Initial requested model context is 8,192 tokens with at most 1,024 output tokens, subject to model validation and workload sizing. Reduce excerpts to leave output headroom, and reject questions that cannot fit. Typical and worst-case lengths must appear separately in load tests.
+
+Prompt instructs evidence-only answers, abstention, citation markers, and ignoring document instructions. No action tools are exposed. Validate structured `answer`, `source_ids`, and `insufficient_evidence` output. Every supported result needs valid inline source markers; resolve filename/page/excerpt server-side from supplied sources. Allow one bounded format-repair attempt, then fail clearly. No retrieved evidence yields deterministic abstention without generation. Identifier checks cannot establish semantic grounding; evaluate with human-labeled cases.
+
+Before publishing and before serving results, recheck user/document status. Deleted/revoked sources invalidate the answer; do not merely remove citations while preserving potentially sensitive answer text. Log no raw question, excerpt, answer, or model reasoning by default. Session history does not influence retrieval in this release; recent request results are persisted only for reconnect/retry.
+
+## 7. Deletion, retention, and consistency
+
+DELETE transaction tombstones the owner-scoped document, invalidates versions, cancels related jobs, records an outbox cleanup job, and returns `202`. New list/retrieval/download/result reads exclude it immediately. A bounded in-flight response that crossed the final authorization check before deletion may finish; deletion cannot retract bytes already sent or previously issued signed URLs. Document this boundary explicitly.
+
+Cleanup workers remove PDF/artifact objects, vector versions, affected saved answers/excerpts, and cache entries; retries and deletion status remain visible. Stale ingestion/answer workers cannot republish deleted data because publication is guarded by current database state and attempt/version tokens. Keep minimal tombstones until all live stores, replicas, caches, and applicable backup retention windows are covered.
+
+Proposed defaults: request/result payloads 24 hours, abandoned uploads 1 hour, sanitized operational logs/audit events 30 days, encrypted backups 30 days; retained document originals persist until user deletion. Finalize these before release. Backups are not instantly erased on a delete: disclose expiry policy, restrict access, and reapply tombstones before any restored environment is served. Document metadata can be minimized after cleanup while retaining the deletion ledger needed to prevent resurrection.
+
+## 8. Versioned API
+
+Protected prefix: `/api/v1`. Bearer access token on every data route. Common error: `{error:{code,message,retryable},request_id}`; no internal paths, SQL, tokens, or stack traces. Enforce body limits, request deadlines, pagination, idempotency, and distributed quotas before expensive work.
+
+| Method / path | Contract |
 | --- | --- |
-| Backend / UI binding | `127.0.0.1:8000` / `127.0.0.1:8501` |
-| Ollama URL | `http://127.0.0.1:11434` |
-| Answer / embedding model | `qwen3:4b` / `nomic-embed-text` |
-| Maximum upload | 20 MiB per file, enforced while reading |
-| Maximum pages | 300 per PDF |
-| Maximum extracted text | 2 million characters per document |
-| Question length | 1–2,000 characters after trimming |
-| Selected documents | 1–10 unique IDs |
-| Chunk target / overlap | 1,200 / 200 characters, bounded to one page |
-| Retrieval / context | top 6 candidates; at most 4,000 context characters |
-| Model context / output budget | request 8,192 context tokens; at most 1,024 output tokens |
-| Model calls | one embedding/generation operation at a time |
-| Upload processing | one ingestion job at a time; at most 3 queued jobs |
-| Model request timeout | 180 seconds; return a retryable service error |
+| `GET /health/live` | Minimal unauthenticated process liveness; no dependency details. |
+| `GET /health/ready` | Internal/operator readiness; app DB/schema and required connections, not an expensive model call per probe. |
+| `GET /api/v1/capabilities` | Authenticated sanitized ingestion/answer availability and limits. |
+| `POST /api/v1/uploads` | `{filename,size_bytes}` + idempotency key -> `201` upload/document ID and expiring upload target. |
+| `POST /api/v1/uploads/{id}/complete` | Verify object + enqueue -> `202` job/document refs; owner duplicate may return `200` existing refs. |
+| `GET /api/v1/documents` | Cursor-paginated owner document summaries. |
+| `GET /api/v1/documents/{id}` | Owner document status, counts, and sanitized failure details. |
+| `GET /api/v1/documents/{id}/download` | Authorized short-lived download target, if enabled. |
+| `POST /api/v1/documents/{id}/retry` | Retry eligible failed ingestion -> `202`; requires intact original and compatible configuration. |
+| `DELETE /api/v1/documents/{id}` | Tombstone + cleanup -> `202` deletion job; repeated delete returns existing deletion status. |
+| `POST /api/v1/chat` | `{question,document_ids}` + idempotency key -> `202` answer job, not a completed answer. |
+| `GET /api/v1/jobs/{id}` | Owner-scoped state/progress, polling hint, expiry, and result when complete. Supports ETag/conditional reads. |
+| `POST /api/v1/jobs/{id}/cancel` | Idempotent cancellation request; running operations stop at safe checkpoints. |
 
-Use a tested tokenizer or conservative token budget check on the complete prompt before generation. Character limits do not guarantee token counts: drop lowest-ranked excerpts until the full prompt fits with output headroom; reject a question that cannot fit. Verify the selected Ollama model supports the requested settings during setup. Include model identity, embedding dimension, chunking settings, and index schema in an index fingerprint.
+Chat result: `{answer,insufficient_evidence,sources:[{source_id,chunk_id,document_id,document_version,filename,page_number,excerpt}]}`. Jobs: queued/running/retrying/succeeded/failed/cancelling/cancelled/expired. Documents: uploading/queued/processing/ready/failed/deleting/deleted. Deleted tombstone access exposes only sanitized owner deletion status, not old content.
 
-## 3. Modules and repository layout
+HTTP mappings: `401` invalid/missing token; `403` missing operation scope; `404` absent/inaccessible object; `409` invalid state, index mismatch, or idempotency conflict; `410` expired owner job result; `413` oversized request/file; `415` unsupported PDF type; `422` schema/content validation; `429` quota/admission limit; `503` dependency/capacity unavailable. Worker/model timeouts and invalid responses are stored as sanitized job errors because the earlier submission already returned `202`.
 
-```text
-app/
-  main.py                 # lifespan, dependency wiring, API routers
-  config.py               # validated environment configuration
-  api/                    # documents, chat, health routes
-  schemas/                # request, response, and internal models
-  services/               # extraction, chunking, ingestion, retrieval, answering
-  storage/                # PostgreSQL repository, Chroma adapter, local files
-ui/streamlit_app.py
-tests/fixtures/
-evaluation/questions.json
-data/                     # ignored: uploads/, chroma/; PostgreSQL data is managed separately
-```
+## 9. UI and caching at scale
 
-Use dependency injection for storage and model clients so automated tests use temporary directories and deterministic fakes. Do not add unnecessary abstractions beyond these boundaries.
+Streamlit retains UI responsibility. Load balancer must support WebSockets, sticky sessions, trusted forwarded headers, consistent cookie secrets, and appropriate timeouts. Replica termination drains connections; reconnect restores recent request status from the API rather than assuming session state is durable. Replicas share no user data through global caches. Built-in upload buffering and rerun costs must be profiled, even if object storage is the durable destination.
 
-## 4. Persistence contract
+Poll only active jobs with server hints, exponential backoff, jitter, and conditional reads; never poll all documents from all idle sessions every two seconds. Count polling and auth traffic in total offered load. On logout/token expiry, discard user session data and stop protected calls until reauthentication. Render model/PDF content safely without unsafe HTML. Client errors must not cause automatic duplicate job submission.
 
-### PostgreSQL documents
+## 10. Deployment, telemetry, and recovery
 
-Run PostgreSQL locally and connect through a configured `DATABASE_URL` using Psycopg 3 with a small bounded connection pool. Use a dedicated application database and role with only the permissions required for that database. Keep credentials in local environment configuration and out of Git and logs. Store PostgreSQL data outside the repository using the database service's managed data directory. Use versioned SQL migrations; run them explicitly during setup and upgrades. Verify database readiness in `/health`; database outages disable ingestion and chat with actionable service errors.
+Use immutable Docker images and Kubernetes manifests/Helm for independently scaled API, UI, ingestion, answer, cleanup, and model-router workloads. GPU pools preload pinned Ollama models; Mac development can use native Ollama. Autoscale API on latency/inflight/CPU, workers on queue age/depth and effective service rate, GPU replicas on safe token capacity/utilization and warmup time; reserve capacity for scale-up delays. Set resource requests/limits, bounded pools, readiness/startup/liveness probes, graceful drain, disruption policies, and private network policies.
 
-Store `id` (UUID primary key), `original_filename`, `stored_filename`, `sha256` (unique), nullable `page_count`, `textless_page_count`, `chunk_count`, `status`, nullable `error_code` and `error_message`, `created_at`, `updated_at`, and `index_fingerprint`. Timestamps use UTC ISO 8601. Status values: `pending`, `processing`, `ready`, `failed`, `deleting`.
+PostgreSQL needs tested standby/failover, backups/PITR, and connection limits. Broker quorum queues need appropriate failure-domain placement. Redis HA/failover and loss semantics must be tested. Object storage and Chroma need a supported redundancy/restore plan. Do not run multiple standalone Chroma replicas against a shared persistent directory. Confirm distributed Chroma's selected offering/deployment availability, licensing, and operational requirements before production signoff.
 
-A single settings record stores schema version and index fingerprint. Use parameterized queries and short transactions; never hold a SQL transaction open during model calls. Create a small migration/version mechanism from the start rather than silently changing existing schemas.
+Use OpenTelemetry request/job correlation and sanitized logs, Prometheus metrics, and Grafana dashboards. Track offered/admitted/completed RPS by endpoint, p50/p95/p99 latency, queue age, retries, outstanding jobs, token rates, GPU memory, DB pools/replication lag, vector latency, upload throughput, deletion backlog, and backup freshness. Alert on SLO burn, stalled queues, model failures, pool saturation, and lost backup/replication health. Do not use user/document IDs as high-cardinality metric labels.
 
-### Chroma chunks
+Release through CI checks -> immutable images/scans -> isolated staging -> migration compatibility -> real-model evaluations -> capacity/fault tests -> canary -> monitored promotion or rollback. Restore drills cover PostgreSQL, objects, deletion ledger, model/index identity, and Chroma snapshots/rebuilds. Rebuild duration must fit RTO; otherwise maintain a tested restorable vector snapshot. [CAPACITY_PLAN.md](CAPACITY_PLAN.md) defines proof required before any 5,000-RPS claim.
 
-Each record has a deterministic chunk ID derived from document ID, page index, chunk index, and fingerprint; embedding; chunk text; and metadata containing document ID, original filename, original 1-based page number, and chunk index. Use one persistent collection per active fingerprint. PostgreSQL readiness remains the authoritative visibility gate.
+## 11. Verification and unresolved decisions
 
-### Files
+Automate owner isolation, version filtering, pagination/idempotency, duplicate delivery, lease fencing, worker death, object/vector partial failure, deleting-during-generation, token expiry/key rotation, and migration compatibility tests. Use temporary object/vector namespaces and separate real service databases. Run browser/WebSocket tests for Streamlit; API-only tests do not prove the UI path.
 
-Store uploads as `<uuid>.pdf` beneath the configured data directory. Treat original filenames as display strings only and escape them in the UI. Resolve and check storage paths beneath the upload root. Use a temporary file during bounded streaming, then atomically move it on acceptance. Never accept client-supplied filesystem paths.
+Before release resolve workload mix/SLOs, corpus/session sizes, hosting/GPU budget, identity provider, object-storage provider, exact Chroma topology, retention, and measured autoscaling thresholds. Preserve main-stack choices unless the owner approves a change after evidence. This document supersedes the in-process queue, process-local locks, local-only uploads, and single-worker architecture from version 1.
 
-## 5. Ingestion and lifecycle
-
-1. Check queue capacity and stream upload with a byte limit; compute SHA-256.
-2. Verify the file opens as PDF and reject encrypted/password-protected files. Check page count before processing all text.
-3. Under a short transaction, create the pending record or return an existing hash match. Remove the duplicate temporary file. Existing failed records are returned with instructions to delete and re-upload.
-4. Move accepted file into controlled storage and enqueue its ID. Return `202`. If storage/enqueue fails, mark failed and clean up temporary state.
-5. Worker marks processing and extracts page text, enforcing total text size. Preserve original page indices; count textless pages. Reject fully textless documents.
-6. Normalize whitespace conservatively. Create deterministic overlapping character chunks within each page, preferring paragraph boundaries and ensuring the next chunk advances. Do not cross page boundaries.
-7. Embed bounded batches with truncation disabled where supported; fail clearly if an input exceeds the model limit. Persist chunks with idempotent upserts.
-8. Verify expected chunk count, then mark ready in PostgreSQL. Only ready IDs are eligible for retrieval.
-9. On failure, exclude the document immediately, delete partial vectors, and mark failed. Persist cleanup errors for startup reconciliation; filtering must exclude failed records even if cleanup fails.
-
-At startup, mark stale pending/processing records failed with `INGESTION_INTERRUPTED` and clean partial vectors. Retry pending deletions. Reconcile orphan files/vectors against document IDs without touching unrelated paths. In-process jobs do not survive restarts; failed documents require deletion and re-upload. Do not silently rebuild incompatible indexes: report `INDEX_INCOMPATIBLE`, block indexing/chat, and provide a documented explicit rebuild procedure that preserves original PDFs until the rebuild succeeds.
-
-### Deletion and concurrency
-
-Use one mutation lock around ingestion/deletion and a visibility lock coordinating chat with deletion. A queued or processing document returns `409 DOCUMENT_BUSY` on deletion; the user retries after completion. Deletion of ready/failed records first sets deleting, then removes vectors and file, then removes the record. Partial deletion remains deleting and excluded; repeated DELETE or startup recovery resumes it idempotently. A missing ID returns `404`.
-
-A chat holds the visibility lock through retrieval and generation. Deletion waits for any active chat to finish; a successful DELETE guarantees no subsequent chat can use that document. Avoid holding the PostgreSQL transaction while waiting. Apply bounded waits and return a retryable busy response instead of blocking indefinitely.
-
-## 6. Retrieval and answer generation
-
-Validate that every requested document exists, is ready, and has a compatible fingerprint. Never interpret an empty selection as all documents. Embed the question with the active embedding model and filter retrieval by the validated IDs. Recheck returned metadata against the allowlist as defense against adapter/filter mistakes.
-
-Retrieve up to six chunks and build a bounded context. Assign request-local source labels such as `S1` only to excerpts actually included in the prompt. Use server-owned filename/page metadata for references; model text never supplies authoritative source metadata. Do not use a universal similarity cutoff or label similarity as answer confidence without evaluation.
-
-System instructions require answers from supplied evidence, explicit abstention when evidence is insufficient, citations for supported claims, and treating document text as untrusted data. Delimit excerpts as data. No code execution, browsing, filesystem, or other action tools are available to the model. Session history is not sent to the backend in the MVP; every question is independent.
-
-Ask the model for a validated structured result with `answer`, `source_ids`, and `insufficient_evidence`; include inline `[S1]` markers in supported answers. Verify the response schema, source IDs, and inline markers against supplied sources. Supported responses require at least one valid citation. Retry once on invalid structure/citations, then return `502 INVALID_MODEL_RESPONSE`; never present unvalidated citations as evidence. If retrieval returns no chunks, respond with a deterministic insufficient-evidence message without generation. An abstention returns no citations and must not contain unsupported factual claims.
-
-Return only cited sources, deduplicated, including exact supplied excerpts. Identifier checks cannot establish semantic support; manual evaluation is required. The insufficient-evidence field is not calibrated confidence.
-
-## 7. API contract
-
-All endpoints return JSON except multipart upload. Invalid field schemas return `422` in the common error envelope. Disable cross-origin access by default; the Streamlit server calls the API locally.
-
-| Method and route | Request | Success |
-| --- | --- | --- |
-| `GET /health` | none | `200`: app/storage health, Ollama reachability, configured model availability, index compatibility, per-capability readiness |
-| `POST /documents` | multipart `file` | `202`: new Document; `200`: existing duplicate Document with `duplicate: true` |
-| `GET /documents` | none | `200`: `{documents: [Document]}` newest first |
-| `GET /documents/{id}` | UUID path | `200`: Document |
-| `DELETE /documents/{id}` | UUID path | `204` on completed deletion |
-| `POST /chat` | `{question: string, document_ids: UUID[]}` | `200`: ChatResponse |
-
-`Document`: id, original_filename, status, nullable page_count, textless_page_count, chunk_count, nullable error `{code,message}`, created_at, updated_at. Upload responses wrap this as `{document, duplicate}`. Do not expose internal storage paths or raw exception messages.
-
-`ChatResponse`: answer string, insufficient_evidence boolean, sources array of `{source_id, chunk_id, document_id, filename, page_number, excerpt}`, request_id. UI renders answer text safely and presents sources as expandable text.
-
-Error envelope: `{error: {code, message, retryable}, request_id}`. HTTP mappings: `413` upload too large; `415` unreadable/non-PDF input; `422` invalid input, encrypted/textless/over-limit PDF if detected synchronously; `404` unknown document; `409` not ready, busy, or index incompatible; `429` queue/concurrency capacity exceeded; `503` storage/model service unavailable; `504` model timeout; `502` invalid model response. Asynchronous ingestion errors appear on the Document instead of changing the completed upload HTTP response. `/health` returns `503` if required storage cannot be opened; model downtime is represented in capability readiness without hiding metadata/delete availability.
-
-Example chat request:
-
-```json
-{"question":"What is the warranty period?","document_ids":["5bbdbaca-b1ec-4c7f-b054-63e33bc20d1a"]}
-```
-
-Example supported response:
-
-```json
-{"answer":"The warranty period is two years [S1].","insufficient_evidence":false,"sources":[{"source_id":"S1","chunk_id":"example-chunk","document_id":"5bbdbaca-b1ec-4c7f-b054-63e33bc20d1a","filename":"manual.pdf","page_number":3,"excerpt":"The warranty period is two years."}],"request_id":"example-request"}
-```
-
-## 8. UI behavior
-
-Sidebar shows readiness, upload controls, per-document status, textless-page notices, document selection, and deletion. Poll processing status approximately every two seconds without triggering duplicate uploads on rerun. Disable asking with no ready selection and prevent repeated submissions while a request is active. Keep session history with each answer's source snapshot. Deleting a document removes history entries referencing it from the current UI session to avoid stale source displays. Clear-history affects no stored documents. Render PDF excerpts and model output as untrusted text; do not enable unsafe HTML.
-
-## 9. Reliability, privacy, and observability
-
-Use one shared model-call semaphore for embedding and generation; release/unload models where the tested Ollama integration supports it to reduce overlapping memory use. Set explicit timeouts and bounded waits. Do not automatically retry a timed-out generation; it may still be finishing locally. Keep the application single-user and localhost-only.
-
-Log request IDs, document IDs, durations, counts, lifecycle transitions, and sanitized error codes. Avoid PDF text, original filenames, questions, answers, and prompts in default logs. Ignore data, environment secrets, and generated logs in Git. Do not add telemetry or remote model fallbacks. Record dependency and model licenses before distribution.
-
-## 10. Verification and tradeoffs
-
-Map tests to PRD requirement IDs. Unit tests cover page-aware chunking, validation, prompt/citation handling, and state transitions. API tests use fake model clients, an isolated test database, and temporary file/vector stores. Storage integration tests exercise real local PostgreSQL/Chroma behavior using an isolated test database and temporary vector directories. Never run destructive tests against the development database. Manual local-model checks evaluate semantic grounding, prompt injection cases, offline operation, memory, and latency against the fixed evaluation set.
-
-Tradeoffs: page-bounded chunks simplify citations but can split a multi-page concept; vector-only retrieval is simpler but may miss exact identifiers; in-process ingestion avoids another service but needs restart recovery; serialized model calls reduce memory pressure but limit throughput. These are acceptable for the local MVP. OCR, reranking, persistent conversations, distributed workers, and deployment remain outside this design.
+Official design references: [Streamlit auth](https://docs.streamlit.io/develop/concepts/connections/authentication), [Streamlit replication](https://docs.streamlit.io/develop/concepts/architecture/architecture), [Chroma distributed architecture](https://docs.trychroma.com/reference/architecture/distributed), [Celery task semantics](https://docs.celeryq.dev/en/stable/userguide/tasks.html), [PostgreSQL backup methods](https://www.postgresql.org/docs/current/backup.html), and [Kubernetes autoscaling](https://kubernetes.io/docs/concepts/workloads/autoscaling/horizontal-pod-autoscale/). These inform the proposal; compatibility/capacity still need implementation verification.

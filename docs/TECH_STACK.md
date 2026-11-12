@@ -1,112 +1,81 @@
 # Technology Stack: AI PDF Chatbot
 
-Status: user-confirmed main stack, version 1.1
+Status: production architecture choices; installation and capacity unverified
+Version: 2.0
 Date: 2026-11-13
 
-## 1. Scope and selection principles
+## 1. Main stack
 
-This document records the technologies we intend to use, their responsibilities, and what must be verified before installation. It is a design choice, not an installed dependency inventory or a compatibility certification. See [PRD.md](PRD.md) for scope, [TECHNICAL_DESIGN.md](TECHNICAL_DESIGN.md) for contracts, and [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) for delivery tasks.
+**Python, Ollama, Qwen3 4B, LlamaIndex, ChromaDB, FastAPI, Streamlit.** These remain the user-selected main technologies. PostgreSQL replaces SQLite for application metadata. The production target is 1,000–5,000 RPS, subject to the workload and evidence in [CAPACITY_PLAN.md](CAPACITY_PLAN.md).
 
-Choose a local-first Python stack that can be learned incrementally on an Apple Silicon MacBook with 16 GB unified memory. Normal runtime must not need a paid API key or remote AI service. Keep one backend, one lightweight UI, a local PostgreSQL service for metadata, persistent ChromaDB vector storage, and bounded model concurrency.
-
-## 2. Main stack
-
-**Python, Ollama, Qwen3 4B, LlamaIndex, ChromaDB, FastAPI, Streamlit.**
-
-These seven technologies are the user-confirmed main stack for implementation.
-
-| Layer | Main technology | Responsibility |
+| Main technology | Responsibility | Production boundary |
 | --- | --- | --- |
-| Language | Python | Application, document processing, and service code. |
-| Local model runtime | Ollama | Run the generation and embedding models locally. |
-| Answer generation | Qwen3 4B | Generate answers grounded in retrieved PDF excerpts. |
-| RAG framework | LlamaIndex | Coordinate document chunking, indexing, and retrieval through the selected integrations. |
-| Vector database | ChromaDB | Persist and search chunk embeddings with source metadata. |
-| Backend API | FastAPI | Expose document management, readiness, and question-answering endpoints. |
-| User interface | Streamlit | Provide PDF uploads, document selection, chat, and source citations. |
+| Python | API, processing, workers, and service code | Lock a tested supported version and dependency set. |
+| Ollama | Serve self-hosted models | Private replicated inference endpoints with measured per-instance admission limits. |
+| Qwen3 4B | Generate evidence-grounded answers | Pin tested model identity and quantization; size GPU replicas from token throughput and latency measurements. |
+| LlamaIndex | RAG adapters and pipeline integration | No ownership decisions or uncontrolled parallel model calls hidden in adapters. |
+| ChromaDB | Vector search and indexed excerpts | Use a private service/distributed deployment validated against corpus, write rate, HA needs, and retrieval QPS; no per-API embedded indexes. |
+| FastAPI | Authenticated document, job, and chat API | Stateless replicas behind ingress; no ingestion/generation in API background tasks. |
+| Streamlit | User-facing document and chat interface | Replicas with WebSocket/session affinity; benchmark sessions, reruns, polling, uploads, and reconnect behavior. |
 
-### Supporting dependencies and tools
+A main-stack selection is not a throughput guarantee. No component replacement is authorized by a failed benchmark alone; record the result and review the change with the project owner.
 
-The following support the main stack. They are not additional primary frameworks or replacements for the seven technologies above.
+## 2. Supporting production infrastructure
 
-| Supporting choice | Purpose |
+These are proposed supporting choices needed to implement the architecture; they do not change the main stack. Final provider, instance types, versions, and costs require measured sizing.
+
+| Component | Proposed choice | Purpose |
+| --- | --- | --- |
+| Application database | PostgreSQL + Psycopg 3 | Authoritative ownership, document state, job/results, idempotency, audit metadata, and transactional outbox. |
+| Connection management | PgBouncer plus bounded application pools | Keep replica/worker connections within the database connection budget; verify compatibility of chosen pooling mode. |
+| Durable jobs | Celery + RabbitMQ quorum queues | Separate ingestion, answer, and cleanup queues; publisher confirms, redelivery, retry limits, and reconciliation. PostgreSQL remains the job source of truth. |
+| Fast shared state | Redis | Distributed quotas, short-lived admission counters, and owner/version-scoped caches; not the only copy of accepted jobs or results. |
+| Shared files | S3-compatible private object storage | PDFs and derived artifacts accessible across replicas, with lifecycle rules and encrypted backups. No pod-local authoritative uploads. |
+| Identity | OIDC/OAuth2 provider integration | Authenticate users and issue access tokens scoped/audienced for FastAPI; verify a concrete provider before release. |
+| Traffic management | TLS load balancer / Kubernetes ingress | Route HTTP/WebSockets, enforce limits, protect private services, and preserve Streamlit affinity. |
+| Packaging | Docker | Build immutable, scanned API/UI/worker images. |
+| Production orchestration | Kubernetes with Helm deployment templates | Replicas, probes, rolling releases, resource budgets, disruption policies, and independently scalable worker/GPU pools. |
+| Local integration | Docker Compose | Reproduce service contracts at small scale; not evidence of production throughput. Native Ollama can remain on the developer Mac. |
+| Telemetry | OpenTelemetry, Prometheus, Grafana | Sanitized traces, metrics, capacity dashboards, and alerts with controlled telemetry access. |
+| Delivery | GitHub Actions | Checks, image scans, staging deployment, migrations, and gated release/rollback workflow. |
+| Load verification | k6 or Locust (select one during setup) | Open-loop offered-load tests and separate browser/WebSocket tests; avoid coordinated omission. |
+
+PostgreSQL, the broker, Redis, object storage, and the selected Chroma deployment need documented HA/recovery arrangements. Multiple application replicas alone do not provide end-to-end HA.
+
+## 3. Supporting Python dependencies
+
+Use uv with a project virtual environment and committed `pyproject.toml`/`uv.lock`. Verify the Python target against all selected dependencies before locking it. Needed groups include FastAPI/Uvicorn, Pydantic/configuration, HTTPX, multipart support, PyMuPDF, LlamaIndex adapters, Chroma client, Psycopg/pooling, Celery, Redis client, object-store SDK, supported token validation, metrics/tracing, pytest, and Ruff. Use versioned SQL migrations executed as a release task; an ORM is not required by this plan.
+
+Nomic Embed Text through Ollama is the supporting embedding model. Use the same immutable embedding identity for indexing and questions; verify dimensions and prevent silent truncation. Embedding capacity is sized separately from generation. Check PyMuPDF and all model/dependency licenses before distribution. Do not invent package pins until the integration is tested.
+
+## 4. Models and scaling
+
+Pin Qwen3 4B and embedding artifacts/digests, model-server image/version, tokenizer, quantization, context/output limits, and index fingerprint. Preload/warm replicas before readiness; never download models on an end-user request. Benchmark GPU memory, prompt prefill, decode, and mixed workloads with realistic lengths. Use separate embedding and generation pools to prevent bulk ingestion starving chat.
+
+Configure bounded per-endpoint concurrency and a scheduling layer that routes only within each replica's measured safe capacity. Adding API pods does not add tokens/second. Model-serving protocol adapters must remain isolated so a future runtime change can be reviewed without rewriting document ownership and RAG services.
+
+## 5. Security and configuration
+
+Configure database/broker/Redis/object-store endpoints, OIDC issuer/audience/JWKS, model endpoint inventory, quotas, queue budgets, token limits, job deadlines, retention, and telemetry using validated environment settings and secret references. Production startup must reject unsafe defaults and absent required secrets. Commit only placeholder examples; do not store access tokens, content, credentials, dumps, or model artifacts in Git or container build contexts.
+
+All storage and inference services are private. FastAPI validates access tokens independently of Streamlit and authorizes document/job IDs on every operation. Never trust an owner ID or plain identity header from the UI. Do not cache per-user data globally in Streamlit; keep state isolated and make critical results recoverable from the API.
+
+## 6. What is deferred
+
+| Deferred item | Reason |
 | --- | --- |
-| Python 3.11 initial target | Verify compatibility before locking the project Python version. |
-| uv and `.venv` | Manage the environment and reproducible dependency lockfile. |
-| Nomic Embed Text through Ollama | Generate local chunk/question embeddings; Qwen3 4B remains the answer model. |
-| PyMuPDF | Extract page-level PDF text; verify licensing before distribution. |
-| PostgreSQL with Psycopg 3 and a bounded connection pool | Track document lifecycle, hashes, and index configuration in a local database service. PostgreSQL is the user-selected metadata database. |
-| Pydantic and pydantic-settings | Validate API schemas and configuration. |
-| Uvicorn, one worker | Serve the FastAPI application locally. |
-| HTTPX | Make local HTTP calls with explicit timeouts where needed. |
-| pytest | Test processing, API behavior, and persistence. |
-| Ruff | Format and lint Python code. |
-| Git and GitHub | Track source, planning documents, and safe fixtures. |
+| pgvector | PostgreSQL owns metadata; ChromaDB remains the chosen vector system. |
+| React / Next.js | Streamlit stays selected; its capacity is an explicit release gate. |
+| Agents / LangGraph | Controlled RAG meets current product scope. |
+| Cloud model APIs | Self-hosted models remain selected; no silent fallback. |
+| OCR / complex table reconstruction | Separate product scope and resource/security evaluation. |
+| Reranking / hybrid search | Add only for evaluated retrieval failures, then remeasure latency and capacity. |
+| Multi-region active-active | Requires a separate consistency and cost design after the initial production deployment. |
 
-Package integration details must be confirmed during setup. Avoid installing overlapping Ollama clients and adapter packages unless they have a defined responsibility. Keep model access behind application interfaces so retries, concurrency, and timeouts behave consistently.
+Docker, durable job infrastructure, authentication, monitoring, shared storage, load tests, and deployment automation are **not deferred** in this production baseline.
 
-## 3. Model strategy
+## 7. Evidence and change control
 
-The user-confirmed generation model is Qwen3 4B (`qwen3:4b` through Ollama); Nomic Embed Text is the supporting embedding model. Download models explicitly; never trigger an unexpected network download from a chat request. Record model tags, digests, quantization where available, embedding dimension, tested context configuration, and license/terms links in the implementation's setup notes.
+Record tested versions, provider configuration, licenses, dependency scans, model identities, and measured component capacities before release. Update the PRD, TDD, implementation plan, and capacity plan for incompatible changes. Rebuild/version indexes for embedding/chunking changes; never mix incompatible vectors.
 
-A model's parameter count is not its total memory requirement. Start with the technical design's conservative context and batch limits, serialize embedding and generation work, and measure actual resource use. Tags may change upstream; a reproducible setup needs recorded artifact identity. A changed embedding model or dimension requires reindexing. A smaller generation model is a possible future fallback only after evaluation; it is not a silently selected runtime alternative.
-
-## 4. Dependency groups
-
-The exact package names/versions are to be confirmed against official documentation during setup.
-
-- Runtime: API/server, validation/configuration, multipart uploads, PDF parsing, RAG core and necessary adapters, vector storage, Psycopg 3 with pooling support, HTTP client, and Streamlit.
-- Development: pytest, necessary API test support, and Ruff.
-- System/local services: supported Python managed for the project, uv, Git, Ollama, and PostgreSQL.
-- Model artifacts: generation and embedding downloads stored by the model runtime, never committed to Git.
-
-Commit `pyproject.toml` and `uv.lock`. Do not invent version pins in planning documents. Record the tested Python version and use the lockfile to reproduce package installation. Test package/model integration on Apple Silicon before treating setup as complete.
-
-## 5. Ownership boundaries
-
-- FastAPI owns orchestration and all writes to application data.
-- PostgreSQL is authoritative for which documents exist and are ready.
-- ChromaDB owns searchable chunk/vector records, not document readiness.
-- LlamaIndex helps integrate RAG components; it must not bypass selected-document filtering or create hidden competing persistence.
-- Ollama computes embeddings and generated answers; it does not manage document state.
-- Streamlit handles presentation and session history; it accesses storage through API calls.
-- The server maps validated model source IDs to filename/page metadata; the model cannot invent authoritative citations.
-
-## 6. Configuration and data locations
-
-Expose validated settings for `DATABASE_URL` (including database credentials), connection pool limits, the data directory, local API and Ollama URLs, model names, upload/page/text limits, chunking, retrieval/context limits, model timeout, queue capacity, and log level. Actual environment variable names will be defined in `.env.example` during setup and must match application configuration.
-
-Keep PDFs under `data/uploads/` and vectors under `data/chroma/`. Store metadata in a dedicated local PostgreSQL database; its service-managed data directory stays outside the repository. Configure the connection through `DATABASE_URL`, provide only a placeholder in `.env.example`, and exclude database dumps/backups from Git. Ignore the entire data directory, `.venv`, real `.env` files, model artifacts, caches, and content-bearing logs. Commit only safe configuration examples and synthetic/permitted fixtures. The roadmap PDF is a local planning reference and should not be copied into the repository by default.
-
-## 7. What we are deferring
-
-| Technology or feature | Reason to defer |
-| --- | --- |
-| pgvector | PostgreSQL stores metadata; ChromaDB remains the selected vector database. |
-| Next.js / React | Streamlit covers the initial document-and-chat interface. |
-| LangGraph / multi-agent frameworks | This project needs a controlled retrieval-and-answer pipeline. |
-| Docker | Native setup comes first; containerization can follow a working MVP if needed. |
-| Redis / Celery | One in-process worker is sufficient initially; restart recovery is explicit. |
-| Cloud LLM APIs | The MVP requires local inference without paid API dependencies. |
-| OCR packages | Scanned-document support is outside the initial product scope. |
-| Ragas / Langfuse | Begin with a small inspectable evaluation set and local timing; add tooling when its benefit is clear. |
-| Rerankers / hybrid search | Add after measured retrieval failures justify more components. |
-
-## 8. Setup verification checklist
-
-- [ ] Verify official package compatibility with the chosen Python and Apple Silicon environment.
-- [ ] Review dependency/model licenses and record applicable distribution constraints.
-- [ ] Lock dependencies and verify installation in a clean virtual environment.
-- [ ] Confirm both local models are available and record identities.
-- [ ] Confirm embeddings have a stable dimension and inputs are not silently truncated.
-- [ ] Confirm configured context/output settings are supported and the complete prompt fits.
-- [ ] Measure ingestion and generation memory with serialized calls.
-- [ ] Install/start local PostgreSQL, create the application database and role, configure `DATABASE_URL`, and apply migrations.
-- [ ] Verify database connection failures are handled and storage tests use an isolated test database.
-- [ ] Confirm persistent stores survive restart and use the expected fingerprint.
-- [ ] Verify runtime works with external network unavailable after setup.
-- [ ] Record tested versions, startup commands, and limitations in README.
-
-## 9. Change policy
-
-Replace a selected technology only for a concrete compatibility, licensing, resource, or product reason. Record the reason and update the TDD, dependency lock, configuration, tests, and relevant implementation tasks together. Re-run affected quality checks; rebuild indexes if embedding or chunking identity changes. No stack component is considered installed merely because it appears here.
+Official references reviewed for this design: [Streamlit architecture](https://docs.streamlit.io/develop/concepts/architecture/architecture), [Streamlit authentication](https://docs.streamlit.io/develop/concepts/connections/authentication), [Streamlit caching](https://docs.streamlit.io/develop/concepts/architecture/caching), [Chroma distributed architecture](https://docs.trychroma.com/reference/architecture/distributed), [Ollama FAQ](https://docs.ollama.com/faq), [Celery with RabbitMQ](https://docs.celeryq.dev/en/stable/getting-started/backends-and-brokers/rabbitmq.html), and [Kubernetes autoscaling](https://kubernetes.io/docs/concepts/workloads/autoscaling/horizontal-pod-autoscale/). Verify exact selected versions against these sources during implementation.

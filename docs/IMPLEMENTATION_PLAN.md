@@ -1,206 +1,115 @@
 # Implementation Plan: AI PDF Chatbot
 
-Status: planned work, version 1.0
-Date: 2026-11-12
+Status: planned production work; no implementation milestone completed by this document
+Version: 2.0
+Date: 2026-11-13
 
-## 1. Inputs and working rules
+## 1. Delivery approach
 
-Build against [PRD.md](PRD.md), [TECHNICAL_DESIGN.md](TECHNICAL_DESIGN.md), and [TECH_STACK.md](TECH_STACK.md). This checklist records planned work, not completed implementation. Work in `/Users/Ahsan/Documents/Projects/ai-pdf-chatbot`. The target is 15 focused working days rather than fixed calendar dates.
+Implement [PRD.md](PRD.md) using [TECHNICAL_DESIGN.md](TECHNICAL_DESIGN.md), [TECH_STACK.md](TECH_STACK.md), and [CAPACITY_PLAN.md](CAPACITY_PLAN.md). Keep the main stack and PostgreSQL. The user-confirmed objective is 1,000–5,000 RPS. A local demo, an architecture diagram, or an acceptance-only benchmark cannot certify it.
 
-Complete each milestone's exit checks before moving to dependent work. Update documents when an implementation decision changes their contracts. Keep uploads, model files, indexes, secrets, and private evaluation material out of commits. Use small implementation commits that represent working steps; the planning-document commits are separate from these future code commits.
+The previous 15-day learning schedule is superseded. Deliver in dependency-ordered phases and estimate dates after resolving workload/infrastructure choices. Hosting purchases and deployment are separate actions; this plan does not authorize spending or create infrastructure. Work in `/Users/Ahsan/Documents/Projects/ai-pdf-chatbot`.
 
-## 2. Dependencies and critical path
+## 2. Phase 0: Requirements, component feasibility, and sizing inputs
 
-```text
-M1: project setup + extraction + chunking
- -> M2: metadata + model adapter + persistent ingestion
- -> M3: filtered retrieval + grounded answers
- -> M4: integrated API + UI
- -> M5: evaluation + reproducible release
-```
+- [ ] Define endpoint mix, including 100% fresh-chat demand, prompt/output distributions, corpus size, upload byte rate, active sessions, and user quotas.
+- [ ] Agree p95/p99 API/complete-answer latency, acceptance/error budgets, queue deadlines, availability, retention, and RPO/RTO targets.
+- [ ] Select hosting/region and budget; benchmark candidate GPU/model configuration before estimating replica counts.
+- [ ] Verify Streamlit authentication/token integration, WebSocket affinity, upload buffering, session behavior, and representative session capacity.
+- [ ] Verify the deployable Chroma topology, licensing, isolation filters, throughput, and recovery model.
+- [ ] Validate RabbitMQ/Celery delivery behavior and model-serving admission under intended versions.
+- [ ] Record dependency/model licenses and tested compatibility; approve any needed stack changes explicitly.
 
-Basic API scaffolding and storage interfaces begin early to support testing. Days 10–12 complete and integrate the API rather than introducing it for the first time.
+Exit: workload and SLO file is concrete, capacity risks are recorded, and no known main-stack blocker is hidden. Covers NFR-03 and NFR-06. Do not build a large deployment before these feasibility checks.
 
-## 3. Milestone 1: Foundation and PDF processing (Days 1–3)
+## 3. Phase 1: Reproducible foundation and identity
 
-### Day 1: Environment and application skeleton
+- [ ] Create Python configuration, uv lockfile, dependency groups, application modules, Ruff/pytest settings, safe `.env.example`, `.gitignore`, and README.
+- [ ] Add API versioning, schemas, sanitized errors/request IDs, liveness/readiness, and dependency injection.
+- [ ] Create immutable API/UI/worker Docker images and small-scale Compose integration services.
+- [ ] Implement OIDC login, supported API access-token flow, independent JWT validation/key rotation, internal user mapping, and logout/expiry behavior.
+- [ ] Add PostgreSQL schemas/versioned migrations, bounded connections, and dedicated test database.
+- [ ] Add private object-store adapter, secret references, and a sanitized logging/metrics baseline.
 
-- [ ] Verify Python/uv/Ollama availability and machine resources.
-- [ ] Check official compatibility and licensing for selected packages/models; record decisions in TECH_STACK and lock compatible dependencies.
-- [ ] Create `pyproject.toml`, `uv.lock`, `.gitignore`, `.env.example`, application configuration, and minimal README.
-- [ ] Create FastAPI entry point and health schema with dependency injection.
-- [ ] Create synthetic/permitted fixtures and a temporary-directory test harness.
+Exit: authenticated API/UI skeleton, isolated tests, and reproducible local integration. Missing/forged/wrong-audience tokens fail; secrets/content do not leak. Covers FR-05, NFR-02, and NFR-05.
 
-Exit: clean setup launches the backend; configuration is validated; secrets and data paths are ignored. Covers NFR-02 and NFR-05.
+## 4. Phase 2: Authorized uploads and PDF processing
 
-### Day 2: Upload validation and page extraction
+- [ ] Implement owner-scoped document state, upload reservations, object upload/completion verification, checksums, and duplicate policy.
+- [ ] Enforce byte/page/text/token limits and per-owner storage quotas across concurrent requests.
+- [ ] Parse in resource-limited, network-disabled workers/subprocesses; reject malformed/encrypted/textless PDFs and report mixed-page limitations.
+- [ ] Create deterministic page-aware chunks and version/index fingerprints.
+- [ ] Test blank-page numbering, Unicode, long pages, malicious filenames, malformed files, over-limit inputs, owner-scoped duplicates, and abandoned-object cleanup.
 
-- [ ] Implement bounded upload streaming, generated filenames, SHA-256, and temporary-file cleanup.
-- [ ] Verify readable PDF content and reject encrypted files, excessive page counts, and excessive text.
-- [ ] Extract page text with original page indices and count textless pages.
-- [ ] Return useful errors for malformed and entirely textless documents.
+Exit: valid uploads are traceable and isolated; invalid inputs fail without exhausting API resources. Covers FR-01, FR-03, FR-05, FR-07, and FR-12.
 
-Exit: validation fixtures cover valid, damaged, encrypted, oversized, textless, and mixed-text PDFs. Covers FR-01 and FR-12.
+## 5. Phase 3: Durable execution and persistent indexing
 
-### Day 3: Page-aware chunking
+- [ ] Implement jobs/idempotency, transactional outbox, publisher confirms, and broker reconciliation.
+- [ ] Configure separate ingestion/answer/cleanup queues with bounded concurrency/prefetch and tested late acknowledgments.
+- [ ] Add attempt leases, heartbeats, publication fencing, deadlines, cancellation, bounded retries, and failed-job inspection.
+- [ ] Implement Ollama embedding adapter, pinned model identity, bounded batching, no silent truncation, and service readiness.
+- [ ] Persist versioned Chroma records through a service adapter; publish ready versions only after complete verified indexing.
+- [ ] Test duplicate delivery, outbox-publish crashes, broker outage, worker death, partial vectors, stale attempts, and reindex compatibility.
 
-- [ ] Implement page-bounded, deterministic chunks with overlap and guaranteed forward progress.
-- [ ] Preserve document ID, filename, chunk index, and page metadata.
-- [ ] Test blank middle pages, short pages, long paragraphs, and Unicode content.
-- [ ] Start a 20-question evaluation file with expected source pages.
+Exit: accepted ingestion survives restarts without duplicate visible data or lost authoritative state. Covers FR-02, FR-04, FR-10, and NFR-04.
 
-Exit: chunks are nonempty, bounded, stable, and traceable to original PDF pages. Covers FR-07.
+## 6. Phase 4: Private retrieval, inference, and answers
 
-## 4. Milestone 2: Persistent ingestion (Days 4–6)
+- [ ] Implement owner/selected-version filtered retrieval and metadata verification.
+- [ ] Build dedicated embedding/generation endpoint routing with distributed capacity budgets, fair per-owner admission, queue deadlines, and safe timeout handling.
+- [ ] Implement full-prompt token budgets, untrusted-source delimiters, structured response validation, source mapping, and bounded repair.
+- [ ] Store short-lived durable job results for reconnect; reauthorize documents/results at publication and read time.
+- [ ] Test missing evidence, invented markers, malformed model output, token overflow, timeouts with unknown execution, expired jobs, and cross-owner result/cache isolation.
+- [ ] Create a tuning set separate from the frozen 100-case release evaluation.
 
-### Day 4: Metadata and local model adapter
+Exit: supported answers have checkable authorized citations; no-evidence questions abstain; saturated inference fails predictably. Covers FR-05 through FR-08, FR-10, and FR-11.
 
-- [ ] Install/start local PostgreSQL and create a dedicated application database and role.
-- [ ] Configure `DATABASE_URL`, Psycopg 3, a bounded connection pool, and versioned SQL migrations.
-- [ ] Implement PostgreSQL schema/version handling and document repository.
-- [ ] Provision an isolated test database; verify readiness checks and database-outage errors.
-- [ ] Define lifecycle transitions and unique-hash duplicate behavior.
-- [ ] Download the planned models explicitly and record tested tags/digests and licenses.
-- [ ] Implement Ollama readiness checks, embedding adapter, explicit timeout, and shared model semaphore.
-- [ ] Verify embedding dimensions and input limits without silent truncation.
+## 7. Phase 5: Deletion, retries, retention, and UI
 
-Exit: real local embedding smoke test passes; routine tests use fakes; unavailable-model errors are actionable. Covers FR-02, FR-03, and FR-10.
+- [ ] Implement tombstone-first deletion with outbox cleanup, cancellation, cache/result invalidation, and idempotent file/vector cleanup.
+- [ ] Prevent stale workers from publishing deleted documents or answers; expose deletion completion status.
+- [ ] Apply retention for results, abandoned uploads, audit/logs, tombstones, and backups; document signed-URL and already-sent-response boundaries.
+- [ ] Build Streamlit sign-in, upload/progress, selection, chat job status, source display, retry/cancel/delete controls, and safe logout.
+- [ ] Add jittered/backoff/conditional polling for active jobs, session affinity, safe rendering, and reconnect restoration.
+- [ ] Test deletion during generation/retry, UI replica loss, upload retries, access revocation, and session/cache separation.
 
-### Day 5: Chroma storage and indexing worker
+Exit: full authorized flow works across replicas, deletion excludes content immediately, and user state survives expected reconnects. Covers FR-08, FR-09, and FR-12.
 
-- [ ] Implement persistent collection and fingerprint compatibility checks.
-- [ ] Store deterministic chunk records through bounded embedding batches.
-- [ ] Add one ingestion worker with bounded queue and publish readiness only after all chunks persist.
-- [ ] Wire upload/list/detail endpoints and duplicate responses.
+## 8. Phase 6: Operational infrastructure and secure release pipeline
 
-Exit: a ready document has the expected vector count and remains available after restart. Covers FR-02 through FR-04 and NFR-03.
+- [ ] Add Kubernetes/Helm manifests for separate API/UI/worker/router/GPU pools, resource budgets, health probes, drains, network policies, secrets, and disruption policies.
+- [ ] Configure ingress TLS, WebSocket affinity, body limits, distributed rate/admission limits, and connection budgets.
+- [ ] Implement/test PostgreSQL HA/PITR, broker quorum recovery, Redis failure behavior, object backups, and supported Chroma backup/restore.
+- [ ] Add OpenTelemetry correlation, Prometheus metrics, Grafana dashboards, queue/deletion/backup alerts, and incident runbooks.
+- [ ] Add CI for lint/tests, storage integration, dependency/image/secret scans, immutable build, staging migrations, canary, and rollback checks.
+- [ ] Exercise schema expand/contract and previous-image rollback; do not rely on destructive down migrations for recovery.
 
-### Day 6: Failure recovery and deletion
+Exit: staging is reproducible and operable; failover, restore, rollback, and alert drills have evidence and an assigned operational owner. Covers FR-13 and NFR-02/NFR-05/NFR-07/NFR-08.
 
-- [ ] Clean partial vectors after ingestion failures and reconcile interrupted records on startup.
-- [ ] Implement deleting state, idempotent cleanup, and orphan reconciliation.
-- [ ] Reject deletion of pending/processing records with a retryable busy response.
-- [ ] Add visibility coordination so deletion and chat cannot race.
-- [ ] Document the explicit index rebuild procedure.
+## 9. Phase 7: Quality and capacity certification
 
-Exit: interruption, duplicate race, cleanup failure, restart, and delete tests pass with temporary real stores. Covers FR-09 and NFR-04.
+- [ ] Freeze/version at least 100 release cases: 80 answerable and 20 unsupported, with expected evidence and adversarial/selection cases.
+- [ ] Meet PRD targets: at least 90% supported-answer success, at least 95% unsupported abstention, all citation references valid, and zero isolation/deletion failures.
+- [ ] Benchmark components with realistic datasets and model lengths; estimate hardware and safe replica counts from actual measurements.
+- [ ] Execute separate metadata, fresh-chat, ingestion, mixed, and browser profiles at 1,000, 2,500, and 5,000 offered RPS as applicable.
+- [ ] Measure accepted versus completed work, p95/p99 latency, token rates, queue growth, retries, polling traffic, and resource/cost metrics.
+- [ ] Run 30-minute sustained stages, a two-hour target-profile soak, overload/burst tests, and node/broker/database/model failures.
+- [ ] Verify load generators are not saturated; reject profiles with hidden dropped arrivals or unbounded queues.
+- [ ] Publish results and blockers; do not claim 5,000 fresh answers/second based on submissions or cheap API reads.
 
-## 5. Milestone 3: Retrieval and answers (Days 7–9)
+Exit: agreed workload and SLOs pass, or a narrower achieved profile is explicitly reported and approved. No component gets bypassed to manufacture a pass. Covers NFR-03 and the PRD release gates.
 
-### Day 7: Filtered retrieval
+## 10. Phase 8: Release handoff
 
-- [ ] Validate selected IDs and require ready, compatible documents.
-- [ ] Embed questions and retrieve only allowed document chunks.
-- [ ] Verify returned metadata against selection and bound retrieved context.
-- [ ] Test empty/unknown/non-ready selections and cross-document isolation.
+- [ ] Document exact setup/deployment, model/index identities, API contracts, quotas, retention, limitations, cost envelope, and certified capacity profile.
+- [ ] Demonstrate backup restore with tombstone replay before opening access; meet measured RPO/RTO or record a blocking failure.
+- [ ] Verify monitoring ownership, certificate/credential rotation, incident response, dependency/model update policy, and deletion support process.
+- [ ] Run clean deployment, representative user acceptance, canary promotion, and rollback rehearsal.
+- [ ] Record release evidence and known limitations; obtain release approval for a specific environment.
 
-Exit: evidence cannot leak from unselected or failed documents. Covers FR-05.
+Exit: production readiness is demonstrated, not inferred from documentation or framework choices.
 
-### Day 8: Grounded generation
+## 11. Commit and verification strategy
 
-- [ ] Implement full-prompt token budgeting and bounded output.
-- [ ] Build explicit untrusted-source delimiters and grounding instructions.
-- [ ] Implement structured output validation, inline source markers, and one repair attempt.
-- [ ] Resolve source metadata server-side and return only valid cited excerpts.
-- [ ] Add deterministic no-retrieval abstention and model timeout/error behavior.
-
-Exit: fake-model tests reject invented citations and malformed answers; a real-model example returns checkable sources. Covers FR-06, FR-07, FR-10, and FR-11.
-
-### Day 9: First quality pass
-
-- [ ] Complete exactly 20 evaluation questions: 15 answerable and five unsupported.
-- [ ] Cover paraphrases, multiple passages, contradictions, document selection, and misleading PDF instructions.
-- [ ] Record expected/retrieved pages, grounding, citations, abstention, and timing.
-- [ ] Tune chunking or retrieval only against recorded failures; rebuild indexes when the fingerprint changes.
-
-Exit: an evaluation report identifies specific failures and fixes without representing similarity as confidence. Covers PRD quality targets.
-
-## 6. Milestone 4: API and Streamlit experience (Days 10–12)
-
-### Day 10: Complete API contracts
-
-- [ ] Finalize all routes, validation schemas, status codes, common error envelope, and request IDs.
-- [ ] Make health report storage health and separate embedding/generation readiness.
-- [ ] Test API behavior with temporary stores and fake model clients.
-- [ ] Verify bounded concurrency and consistent overload responses.
-
-Exit: API contract matches the TDD, including asynchronous ingestion failures and duplicate uploads. Covers FR-01 through FR-10.
-
-### Day 11: Upload and document management UI
-
-- [ ] Build service status, upload, progress polling, textless-page notices, selection, and deletion controls.
-- [ ] Prevent rerun-triggered duplicate submissions and disable invalid actions.
-- [ ] Show useful errors and supported-format/size limitations.
-
-Exit: a user can upload, observe readiness, select, and remove documents through the UI. Covers FR-01, FR-02, FR-05, FR-09, FR-10, and FR-12.
-
-### Day 12: Chat and sources UI
-
-- [ ] Add independent question submission and session history.
-- [ ] Show safe answer text and expandable source filename/page/excerpt.
-- [ ] Add clear-history behavior and remove affected history entries after deletion.
-- [ ] Explain independent-question behavior and original PDF page indexing.
-
-Exit: full upload-to-answer flow works; source text is safe to display; clearing history preserves documents. Covers FR-06 through FR-08 and FR-12.
-
-## 7. Milestone 5: Release verification (Days 13–15)
-
-### Day 13: Integration and robustness
-
-- [ ] Run unit, API, and real local storage tests.
-- [ ] Verify backend interruption during indexing and cleanup recovery.
-- [ ] Exercise missing Ollama/model, timeout, malformed output, queue capacity, and deletion races.
-- [ ] Check logs and repository contents for accidental document text, secrets, or local data.
-
-Exit: deterministic checks pass and no critical filtering, deletion, or privacy defect remains.
-
-### Day 14: Local evaluation and performance
-
-- [ ] Run the fixed evaluation set with real models and record model/configuration identity.
-- [ ] Meet the PRD target: at least 12/15 answerable successes, all 5/5 unsupported abstentions, and valid metadata for every displayed citation.
-- [ ] Record retrieval and end-to-end latency, ingestion time, peak memory, and document sizes on the target Mac.
-- [ ] Demonstrate prepared runtime with external network unavailable.
-- [ ] Fix failures, rerun affected checks, and rerun the full fixed evaluation if retrieval/prompt/model settings change.
-
-Exit: quality targets are measured and met; unsupported promises are absent from documentation. Covers NFR-01 and NFR-03.
-
-### Day 15: Documentation and demonstration
-
-- [ ] Finish README setup, model downloads, startup commands, configuration, troubleshooting, test commands, and limitations.
-- [ ] Document architecture, restart recovery, deletion, index rebuilding, and license considerations.
-- [ ] Verify setup from a clean virtual environment with locked dependencies.
-- [ ] Create a short permitted-data demo showing upload, grounded answer, unsupported question, and deletion.
-- [ ] Record final acceptance results and known limitations in an evaluation report.
-
-Exit: PRD release checklist passes and the project owner can reproduce the demonstration.
-
-## 8. Suggested implementation commit boundaries
-
-1. Python project configuration and backend skeleton.
-2. Validated PDF extraction and page-aware chunking.
-3. PostgreSQL document lifecycle and duplicate handling.
-4. Ollama adapter and persistent vector ingestion.
-5. Recovery and complete document deletion.
-6. Selected-document retrieval.
-7. Grounded generation and citation validation.
-8. Complete API contracts and errors.
-9. Streamlit document management.
-10. Chat interface and source display.
-11. Evaluation fixtures, robustness fixes, and release documentation.
-
-Group meaningful tests with their implementation. Do not create placeholder modules or unrelated changes just to follow this list.
-
-## 9. Risks and responses
-
-| Risk | Response |
-| --- | --- |
-| Model exceeds practical memory budget | Serialize calls, reduce context/batches, measure; evaluate a smaller model only as a documented change. |
-| Packages or model APIs differ from expectations | Verify official documentation during setup; lock tested versions and adapt the TDD. |
-| Retrieval misses expected evidence | Inspect chunks and expected pages before changing the model; record tuning results. |
-| Model follows instructions inside PDFs | Keep sources delimited and tool access absent; include adversarial cases and document residual limitations. |
-| Storage operations partially fail | Keep lifecycle states authoritative, exclude incomplete records, and verify idempotent cleanup. |
-| Work exceeds 15 days | Preserve MVP acceptance requirements; defer optional enhancements and revise the schedule. |
-
-## 10. Definition of done
-
-The product meets PRD acceptance criteria, code and tests are committed, fixed evaluation targets are met, local/offline operation is demonstrated, setup is reproducible, and known limitations are documented. Writing these planning files does not mean any implementation milestone is complete.
+Keep meaningful implementation changes and their tests together: foundation/auth, metadata/migrations, uploads, durable jobs, indexing, private retrieval, inference/results, deletion, UI, infrastructure, and capacity evidence. Do not create empty modules to mirror a plan. Test units with fakes; integration-test actual isolated PostgreSQL/broker/object/vector services; evaluate actual models and actual UI separately. Re-run affected checks after changes and re-certify performance when model, tokenizer, chunking, topology, or workload changes.
