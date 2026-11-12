@@ -10,6 +10,8 @@ Build a single-user local application that answers natural-language questions ab
 
 This document defines product behavior and acceptance criteria. [TECHNICAL_DESIGN.md](TECHNICAL_DESIGN.md) defines implementation decisions, [TECH_STACK.md](TECH_STACK.md) defines technology choices, and [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) sequences delivery. The existing [PROJECT_IDEA.md](PROJECT_IDEA.md) provides background; these four documents are the implementation baseline. Changes to scope must update the affected requirements and tasks together.
 
+The metadata database is local PostgreSQL; ChromaDB remains responsible for vector storage. Database setup and credentials must be documented without committing secrets.
+
 ## 2. Target user and environment
 
 The primary user is a learner or developer who wants to question study material, manuals, and similar documents privately on an Apple Silicon MacBook with 16 GB unified memory. The initial interface and API are accessible only on localhost. Internet access is needed for dependency and model downloads; normal document processing must use local services and require no paid AI API key.

@@ -42,7 +42,11 @@ The initial goal is a working, understandable retrieval-augmented generation (RA
 
 OCR for scanned documents, user accounts, public hosting, shared workspaces, cloud model providers, fine-tuning, autonomous agents, and extracting complex charts or table structure. PDFs containing little or no extractable text should receive a clear message explaining the limitation.
 
-## Proposed technology stack
+## Technology stack
+
+Main stack: **Python, Ollama, Qwen3 4B, LlamaIndex, ChromaDB, FastAPI, Streamlit**. Supporting dependencies and tools are detailed in [TECH_STACK.md](TECH_STACK.md).
+
+The table below includes both main technologies and supporting dependencies.
 
 | Component | Choice | Purpose |
 | --- | --- | --- |
@@ -56,7 +60,7 @@ OCR for scanned documents, user accounts, public hosting, shared workspaces, clo
 | PDF extraction | PyMuPDF | Extract page-level text |
 | Backend | FastAPI and Pydantic | Validated API requests and responses |
 | Interface | Streamlit | Upload, document selection, and chat |
-| Metadata | SQLite | Document records and processing state |
+| Metadata | PostgreSQL | Document records and processing state |
 | Testing | pytest | Unit and API tests |
 
 These are planned choices based on the roadmap, not a claim that dependencies or models are already installed. Verify package compatibility, model availability, and model licenses during implementation, then record the working versions in the project lockfile.
@@ -75,7 +79,7 @@ FastAPI backend
     |       +-- Chunking
     |       +-- Ollama embeddings
     |       +-- ChromaDB index
-    |       +-- SQLite document metadata
+    |       +-- PostgreSQL document metadata
     |
     +-- Question-answering service
             +-- Filter by selected document IDs
@@ -199,9 +203,10 @@ ai-pdf-chatbot/
 │   └── questions.json
 └── data/                    # ignored by Git
     ├── uploads/
-    ├── chroma/
-    └── metadata.sqlite3
+    └── chroma/
 ```
+
+PostgreSQL metadata lives in a separate local database service, configured through `DATABASE_URL`; database files and credentials are not stored in the repository. ChromaDB continues to store vectors.
 
 This layout is a proposal; create modules when they are needed rather than filling the repository with empty files.
 

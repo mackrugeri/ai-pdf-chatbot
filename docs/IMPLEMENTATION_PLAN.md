@@ -55,7 +55,10 @@ Exit: chunks are nonempty, bounded, stable, and traceable to original PDF pages.
 
 ### Day 4: Metadata and local model adapter
 
-- [ ] Implement SQLite schema/version handling and document repository.
+- [ ] Install/start local PostgreSQL and create a dedicated application database and role.
+- [ ] Configure `DATABASE_URL`, Psycopg 3, a bounded connection pool, and versioned SQL migrations.
+- [ ] Implement PostgreSQL schema/version handling and document repository.
+- [ ] Provision an isolated test database; verify readiness checks and database-outage errors.
 - [ ] Define lifecycle transitions and unique-hash duplicate behavior.
 - [ ] Download the planned models explicitly and record tested tags/digests and licenses.
 - [ ] Implement Ollama readiness checks, embedding adapter, explicit timeout, and shared model semaphore.
@@ -175,7 +178,7 @@ Exit: PRD release checklist passes and the project owner can reproduce the demon
 
 1. Python project configuration and backend skeleton.
 2. Validated PDF extraction and page-aware chunking.
-3. SQLite document lifecycle and duplicate handling.
+3. PostgreSQL document lifecycle and duplicate handling.
 4. Ollama adapter and persistent vector ingestion.
 5. Recovery and complete document deletion.
 6. Selected-document retrieval.

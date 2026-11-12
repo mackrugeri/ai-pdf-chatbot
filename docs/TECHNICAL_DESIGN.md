@@ -7,20 +7,22 @@ Technology rationale: [TECH_STACK.md](TECH_STACK.md)
 
 ## 1. Design approach
 
-Use a Streamlit UI backed by a single FastAPI process. Keep PDF extraction, embeddings, retrieval, generation, and persistence behind separate service interfaces. SQLite owns document lifecycle state; ChromaDB stores chunk text, vectors, and source metadata; the filesystem stores uploaded PDFs. Ollama provides local embedding and generation models. LlamaIndex coordinates chunking/retrieval adapters without owning a second authoritative metadata database.
+Main stack: **Python, Ollama, Qwen3 4B, LlamaIndex, ChromaDB, FastAPI, Streamlit**. Supporting dependencies and tools are detailed in [TECH_STACK.md](TECH_STACK.md).
+
+Use a Streamlit UI backed by a single FastAPI process. Keep PDF extraction, embeddings, retrieval, generation, and persistence behind separate service interfaces. PostgreSQL owns document lifecycle state; ChromaDB stores chunk text, vectors, and source metadata; the filesystem stores uploaded PDFs. Ollama provides local embedding and generation models. LlamaIndex coordinates chunking/retrieval adapters without owning a second authoritative metadata database.
 
 ```text
 Streamlit -> FastAPI -> Document service -> PDF extraction -> Chunking
                     |                                      -> Ollama embeddings
                     |                                      -> ChromaDB
-                    |                -> SQLite + local PDF files
+                    |                -> PostgreSQL + local PDF files
                     |
                     -> Answer service -> selected ready IDs -> ChromaDB retrieval
                                       -> bounded excerpts -> Ollama generation
                                       -> citation validation -> response
 ```
 
-Backend is the sole storage owner. UI never reads SQLite, ChromaDB, or uploaded files directly. Use one backend worker; embedded storage and in-process jobs are not designed here for multiple API workers.
+Backend is the sole storage owner. UI never reads PostgreSQL, ChromaDB, or uploaded files directly. Use one backend worker; in-process jobs and coordination locks are not designed here for multiple API workers.
 
 ## 2. Configuration and initial limits
 
@@ -54,18 +56,20 @@ app/
   api/                    # documents, chat, health routes
   schemas/                # request, response, and internal models
   services/               # extraction, chunking, ingestion, retrieval, answering
-  storage/                # SQLite repository, Chroma adapter, local files
+  storage/                # PostgreSQL repository, Chroma adapter, local files
 ui/streamlit_app.py
 tests/fixtures/
 evaluation/questions.json
-data/                     # ignored: uploads/, chroma/, metadata.sqlite3
+data/                     # ignored: uploads/, chroma/; PostgreSQL data is managed separately
 ```
 
 Use dependency injection for storage and model clients so automated tests use temporary directories and deterministic fakes. Do not add unnecessary abstractions beyond these boundaries.
 
 ## 4. Persistence contract
 
-### SQLite documents
+### PostgreSQL documents
+
+Run PostgreSQL locally and connect through a configured `DATABASE_URL` using Psycopg 3 with a small bounded connection pool. Use a dedicated application database and role with only the permissions required for that database. Keep credentials in local environment configuration and out of Git and logs. Store PostgreSQL data outside the repository using the database service's managed data directory. Use versioned SQL migrations; run them explicitly during setup and upgrades. Verify database readiness in `/health`; database outages disable ingestion and chat with actionable service errors.
 
 Store `id` (UUID primary key), `original_filename`, `stored_filename`, `sha256` (unique), nullable `page_count`, `textless_page_count`, `chunk_count`, `status`, nullable `error_code` and `error_message`, `created_at`, `updated_at`, and `index_fingerprint`. Timestamps use UTC ISO 8601. Status values: `pending`, `processing`, `ready`, `failed`, `deleting`.
 
@@ -73,7 +77,7 @@ A single settings record stores schema version and index fingerprint. Use parame
 
 ### Chroma chunks
 
-Each record has a deterministic chunk ID derived from document ID, page index, chunk index, and fingerprint; embedding; chunk text; and metadata containing document ID, original filename, original 1-based page number, and chunk index. Use one persistent collection per active fingerprint. SQLite readiness remains the authoritative visibility gate.
+Each record has a deterministic chunk ID derived from document ID, page index, chunk index, and fingerprint; embedding; chunk text; and metadata containing document ID, original filename, original 1-based page number, and chunk index. Use one persistent collection per active fingerprint. PostgreSQL readiness remains the authoritative visibility gate.
 
 ### Files
 
@@ -88,7 +92,7 @@ Store uploads as `<uuid>.pdf` beneath the configured data directory. Treat origi
 5. Worker marks processing and extracts page text, enforcing total text size. Preserve original page indices; count textless pages. Reject fully textless documents.
 6. Normalize whitespace conservatively. Create deterministic overlapping character chunks within each page, preferring paragraph boundaries and ensuring the next chunk advances. Do not cross page boundaries.
 7. Embed bounded batches with truncation disabled where supported; fail clearly if an input exceeds the model limit. Persist chunks with idempotent upserts.
-8. Verify expected chunk count, then mark ready in SQLite. Only ready IDs are eligible for retrieval.
+8. Verify expected chunk count, then mark ready in PostgreSQL. Only ready IDs are eligible for retrieval.
 9. On failure, exclude the document immediately, delete partial vectors, and mark failed. Persist cleanup errors for startup reconciliation; filtering must exclude failed records even if cleanup fails.
 
 At startup, mark stale pending/processing records failed with `INGESTION_INTERRUPTED` and clean partial vectors. Retry pending deletions. Reconcile orphan files/vectors against document IDs without touching unrelated paths. In-process jobs do not survive restarts; failed documents require deletion and re-upload. Do not silently rebuild incompatible indexes: report `INDEX_INCOMPATIBLE`, block indexing/chat, and provide a documented explicit rebuild procedure that preserves original PDFs until the rebuild succeeds.
@@ -97,7 +101,7 @@ At startup, mark stale pending/processing records failed with `INGESTION_INTERRU
 
 Use one mutation lock around ingestion/deletion and a visibility lock coordinating chat with deletion. A queued or processing document returns `409 DOCUMENT_BUSY` on deletion; the user retries after completion. Deletion of ready/failed records first sets deleting, then removes vectors and file, then removes the record. Partial deletion remains deleting and excluded; repeated DELETE or startup recovery resumes it idempotently. A missing ID returns `404`.
 
-A chat holds the visibility lock through retrieval and generation. Deletion waits for any active chat to finish; a successful DELETE guarantees no subsequent chat can use that document. Avoid holding the SQLite transaction while waiting. Apply bounded waits and return a retryable busy response instead of blocking indefinitely.
+A chat holds the visibility lock through retrieval and generation. Deletion waits for any active chat to finish; a successful DELETE guarantees no subsequent chat can use that document. Avoid holding the PostgreSQL transaction while waiting. Apply bounded waits and return a retryable busy response instead of blocking indefinitely.
 
 ## 6. Retrieval and answer generation
 
@@ -154,6 +158,6 @@ Log request IDs, document IDs, durations, counts, lifecycle transitions, and san
 
 ## 10. Verification and tradeoffs
 
-Map tests to PRD requirement IDs. Unit tests cover page-aware chunking, validation, prompt/citation handling, and state transitions. API tests use fake model clients and temporary stores. Storage integration tests exercise real local SQLite/Chroma behavior. Manual local-model checks evaluate semantic grounding, prompt injection cases, offline operation, memory, and latency against the fixed evaluation set.
+Map tests to PRD requirement IDs. Unit tests cover page-aware chunking, validation, prompt/citation handling, and state transitions. API tests use fake model clients, an isolated test database, and temporary file/vector stores. Storage integration tests exercise real local PostgreSQL/Chroma behavior using an isolated test database and temporary vector directories. Never run destructive tests against the development database. Manual local-model checks evaluate semantic grounding, prompt injection cases, offline operation, memory, and latency against the fixed evaluation set.
 
 Tradeoffs: page-bounded chunks simplify citations but can split a multi-page concept; vector-only retrieval is simpler but may miss exact identifiers; in-process ingestion avoids another service but needs restart recovery; serialized model calls reduce memory pressure but limit throughput. These are acceptable for the local MVP. OCR, reranking, persistent conversations, distributed workers, and deployment remain outside this design.
