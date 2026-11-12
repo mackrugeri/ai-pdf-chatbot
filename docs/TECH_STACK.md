@@ -1,7 +1,7 @@
 # Technology Stack: AI PDF Chatbot
 
 Status: production architecture choices; installation and capacity unverified
-Version: 2.0
+Version: 2.1
 Date: 2026-11-13
 
 ## 1. Main stack
@@ -30,7 +30,8 @@ These are proposed supporting choices needed to implement the architecture; they
 | Connection management | PgBouncer plus bounded application pools | Keep replica/worker connections within the database connection budget; verify compatibility of chosen pooling mode. |
 | Durable jobs | Celery + RabbitMQ quorum queues | Separate ingestion, answer, and cleanup queues; publisher confirms, redelivery, retry limits, and reconciliation. PostgreSQL remains the job source of truth. |
 | Fast shared state | Redis | Distributed quotas, short-lived admission counters, and owner/version-scoped caches; not the only copy of accepted jobs or results. |
-| Shared files | S3-compatible private object storage | PDFs and derived artifacts accessible across replicas, with lifecycle rules and encrypted backups. No pod-local authoritative uploads. |
+| Shared files and payloads | S3-compatible private object storage | PDFs, bounded job/result payloads, and artifacts across replicas; version-pinned verified staging, server-only immutable final objects, encryption, lifecycle cleanup, and backups. No pod-local authoritative uploads. |
+| Deletion recovery journal | Independently protected append-only object-storage namespace or equivalent durable service | Minimal deletion intents survive an application database rollback; restricted retention and verified replay/cutover gate restored access. Provider guarantees must be validated. |
 | Identity | OIDC/OAuth2 provider integration | Authenticate users and issue access tokens scoped/audienced for FastAPI; verify a concrete provider before release. |
 | Traffic management | TLS load balancer / Kubernetes ingress | Route HTTP/WebSockets, enforce limits, protect private services, and preserve Streamlit affinity. |
 | Packaging | Docker | Build immutable, scanned API/UI/worker images. |
@@ -40,7 +41,7 @@ These are proposed supporting choices needed to implement the architecture; they
 | Delivery | GitHub Actions | Checks, image scans, staging deployment, migrations, and gated release/rollback workflow. |
 | Load verification | k6 or Locust (select one during setup) | Open-loop offered-load tests and separate browser/WebSocket tests; avoid coordinated omission. |
 
-PostgreSQL, the broker, Redis, object storage, and the selected Chroma deployment need documented HA/recovery arrangements. Multiple application replicas alone do not provide end-to-end HA.
+PostgreSQL, the broker, Redis, object storage, the independent deletion journal, and the selected Chroma deployment need documented HA/recovery arrangements. Job history partitioning, idempotency receipts, external payload retention, and cleanup throughput must satisfy the measured storage budget. Multiple application replicas alone do not provide end-to-end HA.
 
 ## 3. Supporting Python dependencies
 

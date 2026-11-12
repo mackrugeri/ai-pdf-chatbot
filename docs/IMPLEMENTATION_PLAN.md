@@ -1,7 +1,7 @@
 # Implementation Plan: AI PDF Chatbot
 
 Status: planned production work; no implementation milestone completed by this document
-Version: 2.0
+Version: 2.1
 Date: 2026-11-13
 
 ## 1. Delivery approach
@@ -18,6 +18,8 @@ The previous 15-day learning schedule is superseded. Deliver in dependency-order
 - [ ] Verify Streamlit authentication/token integration, WebSocket affinity, upload buffering, session behavior, and representative session capacity.
 - [ ] Verify the deployable Chroma topology, licensing, isolation filters, throughput, and recovery model.
 - [ ] Validate RabbitMQ/Celery delivery behavior and model-serving admission under intended versions.
+- [ ] Define hot-row/index/payload sizes, peak new-job rate, retention windows, partition/lookup/idempotency constraints, cleanup throughput, and storage/WAL/backup budgets.
+- [ ] Select/test immutable object acceptance and an independently protected deletion journal with replay/cutover guarantees.
 - [ ] Record dependency/model licenses and tested compatibility; approve any needed stack changes explicitly.
 
 Exit: workload and SLO file is concrete, capacity risks are recorded, and no known main-stack blocker is hidden. Covers NFR-03 and NFR-06. Do not build a large deployment before these feasibility checks.
@@ -35,7 +37,8 @@ Exit: authenticated API/UI skeleton, isolated tests, and reproducible local inte
 
 ## 4. Phase 2: Authorized uploads and PDF processing
 
-- [ ] Implement owner-scoped document state, upload reservations, object upload/completion verification, checksums, and duplicate policy.
+- [ ] Implement owner-scoped document state, upload reservations, verified version-pinned staging, server-only immutable final promotion, checksums, and idempotent duplicate/completion handling.
+- [ ] Test staging URL reuse, overwrite during/after completion, pinned-version downloads, and crash recovery around promotion.
 - [ ] Enforce byte/page/text/token limits and per-owner storage quotas across concurrent requests.
 - [ ] Parse in resource-limited, network-disabled workers/subprocesses; reject malformed/encrypted/textless PDFs and report mixed-page limitations.
 - [ ] Create deterministic page-aware chunks and version/index fingerprints.
@@ -59,7 +62,9 @@ Exit: accepted ingestion survives restarts without duplicate visible data or los
 - [ ] Implement owner/selected-version filtered retrieval and metadata verification.
 - [ ] Build dedicated embedding/generation endpoint routing with distributed capacity budgets, fair per-owner admission, queue deadlines, and safe timeout handling.
 - [ ] Implement full-prompt token budgets, untrusted-source delimiters, structured response validation, source mapping, and bounded repair.
-- [ ] Store short-lived durable job results for reconnect; reauthorize documents/results at publication and read time.
+- [ ] Store short-lived encrypted payload/result objects with compact PostgreSQL control rows; reauthorize documents/results at publication and read time.
+- [ ] Implement owner-scoped `GET /api/v1/jobs` with bounded keyset pagination/filtering and no content payloads; test cursor ownership, equal timestamps, concurrent arrivals, expiry, and empty-session rediscovery.
+- [ ] Add partitioned history/retention jobs, independent idempotency receipts, orphan cleanup, and byte/cleanup-lag metrics; test expiry cannot resubmit duplicate work or drop running jobs.
 - [ ] Test missing evidence, invented markers, malformed model output, token overflow, timeouts with unknown execution, expired jobs, and cross-owner result/cache isolation.
 - [ ] Create a tuning set separate from the frozen 100-case release evaluation.
 
@@ -67,11 +72,12 @@ Exit: supported answers have checkable authorized citations; no-evidence questio
 
 ## 7. Phase 5: Deletion, retries, retention, and UI
 
-- [ ] Implement tombstone-first deletion with outbox cleanup, cancellation, cache/result invalidation, and idempotent file/vector cleanup.
+- [ ] Implement journal-first deletion with durable independently protected intents before database tombstones/outbox cleanup; handle journal outage, partial transaction failure, retries, and intent reconciliation.
+- [ ] Add cancellation, cache/result invalidation, and idempotent file/vector cleanup for tombstoned documents.
 - [ ] Prevent stale workers from publishing deleted documents or answers; expose deletion completion status.
 - [ ] Apply retention for results, abandoned uploads, audit/logs, tombstones, and backups; document signed-URL and already-sent-response boundaries.
 - [ ] Build Streamlit sign-in, upload/progress, selection, chat job status, source display, retry/cancel/delete controls, and safe logout.
-- [ ] Add jittered/backoff/conditional polling for active jobs, session affinity, safe rendering, and reconnect restoration.
+- [ ] Add jittered/backoff/conditional polling, session affinity, safe rendering, and reconnect restoration using job discovery without browser-held IDs.
 - [ ] Test deletion during generation/retry, UI replica loss, upload retries, access revocation, and session/cache separation.
 
 Exit: full authorized flow works across replicas, deletion excludes content immediately, and user state survives expected reconnects. Covers FR-08, FR-09, and FR-12.
@@ -81,6 +87,7 @@ Exit: full authorized flow works across replicas, deletion excludes content imme
 - [ ] Add Kubernetes/Helm manifests for separate API/UI/worker/router/GPU pools, resource budgets, health probes, drains, network policies, secrets, and disruption policies.
 - [ ] Configure ingress TLS, WebSocket affinity, body limits, distributed rate/admission limits, and connection budgets.
 - [ ] Implement/test PostgreSQL HA/PITR, broker quorum recovery, Redis failure behavior, object backups, and supported Chroma backup/restore.
+- [ ] Keep the deletion journal outside the application restore boundary with restricted append-only retention; implement closed-access restore, current-ledger replay, coverage checks, writer fencing, and cutover checkpoints.
 - [ ] Add OpenTelemetry correlation, Prometheus metrics, Grafana dashboards, queue/deletion/backup alerts, and incident runbooks.
 - [ ] Add CI for lint/tests, storage integration, dependency/image/secret scans, immutable build, staging migrations, canary, and rollback checks.
 - [ ] Exercise schema expand/contract and previous-image rollback; do not rely on destructive down migrations for recovery.
@@ -95,6 +102,7 @@ Exit: staging is reproducible and operable; failover, restore, rollback, and ale
 - [ ] Execute separate metadata, fresh-chat, ingestion, mixed, and browser profiles at 1,000, 2,500, and 5,000 offered RPS as applicable.
 - [ ] Measure accepted versus completed work, p95/p99 latency, token rates, queue growth, retries, polling traffic, and resource/cost metrics.
 - [ ] Run 30-minute sustained stages, a two-hour target-profile soak, overload/burst tests, and node/broker/database/model failures.
+- [ ] Sustain admitted-job retention/expiry under target volume; measure rows/indexes, payload bytes, WAL/replicas, backups, partition rotation, orphan cleanup, idempotency storage, and oldest cleanup age against agreed budgets.
 - [ ] Verify load generators are not saturated; reject profiles with hidden dropped arrivals or unbounded queues.
 - [ ] Publish results and blockers; do not claim 5,000 fresh answers/second based on submissions or cheap API reads.
 
@@ -103,7 +111,8 @@ Exit: agreed workload and SLOs pass, or a narrower achieved profile is explicitl
 ## 10. Phase 8: Release handoff
 
 - [ ] Document exact setup/deployment, model/index identities, API contracts, quotas, retention, limitations, cost envelope, and certified capacity profile.
-- [ ] Demonstrate backup restore with tombstone replay before opening access; meet measured RPO/RTO or record a blocking failure.
+- [ ] Acknowledge a deletion after a backup, restore that older backup, and prove current independent journal replay prevents resurrection before access/dispatch resumes; journal gaps must keep readiness closed.
+- [ ] Verify journal coverage and cutover during concurrent deletion attempts; meet measured RPO/RTO or record a blocking failure.
 - [ ] Verify monitoring ownership, certificate/credential rotation, incident response, dependency/model update policy, and deletion support process.
 - [ ] Run clean deployment, representative user acceptance, canary promotion, and rollback rehearsal.
 - [ ] Record release evidence and known limitations; obtain release approval for a specific environment.

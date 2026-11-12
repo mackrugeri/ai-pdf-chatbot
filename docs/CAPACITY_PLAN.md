@@ -1,7 +1,7 @@
 # Capacity and Load-Test Plan: AI PDF Chatbot
 
 Status: sizing framework and release targets; no capacity measured
-Version: 1.0
+Version: 1.1
 Date: 2026-11-13
 
 ## 1. Confirmed requirement and unknowns
@@ -62,6 +62,14 @@ If only 10% of the same aggregate 5,000 RPS were fresh chat, fresh-answer demand
 
 Also budget UI/identity traffic, polling, network egress, vector retrieval, query embeddings, ingestion embeddings, broker/outbox writes, result reads, object storage, and per-user quotas. For example, 10,000 pending jobs polled once every two seconds add 5,000 status reads/second by themselves; use backoff/jitter/conditional reads and count this overhead.
 
+### Job/result retention and cleanup sizing
+
+Count newly accepted durable jobs separately from all HTTP requests. At 5,000 new jobs/second, 24 hours retains `5,000 * 86,400 = 432,000,000` jobs. Illustrative raw sizing: 1,000 bytes of hot metadata per job is 432 GB; 8,000 bytes of payload per job is 3.456 TB. Neither includes indexes, receipts, outbox/audit events, retries, WAL, replication, backups, object request costs, or deletion-journal entries. These are arithmetic examples, not measured row sizes or a storage purchase estimate.
+
+The workload file must specify average/p95 metadata and payload sizes, job arrival rate by type, retention/retry windows, replica/backup overhead, high-water storage limits, and purge/partition-rotation service budgets. Hot PostgreSQL records hold bounded control metadata/references; encrypted payloads/results go to private object storage. Validate time partitioning, lookup/uniqueness/idempotency constraints, and active-job survival through migrations and load tests.
+
+In steady state, expiry/cleanup must remove at least the arriving expired data volume over each retention cycle, with catch-up headroom for outages. Run expiry tests against realistically pre-aged retained data; a two-hour soak cannot prove a 24-hour lifecycle by itself. Verify terminal-history partition rotation, object expiry, orphan reconciliation, and independent receipt retention do not generate duplicate work or long database stalls. Report retained bytes, index/WAL growth, expired-but-not-purged bytes, oldest cleanup age, and backlog trend. Block admission before exhausting storage; certify the proposed 24-hour TTL only if cost and cleanup budgets pass.
+
 ## 5. Component capacity tests
 
 1. **FastAPI/ingress:** authenticated real validation and representative responses, then isolated stub-downstream tests to locate overhead. Report both; stubs do not certify end to end.
@@ -80,6 +88,8 @@ Suggested test sequence: functional smoke -> component saturation search -> 1,00
 
 Before executing certification, set p95/p99 API and complete-answer latency budgets, error/acceptance targets, maximum queue age, upload service budgets, corpus sizes, and allowed failure windows in the workload file. These are release-blocking decisions, not blanks to hide in a report. A successful run must meet those targets, maintain bounded/stable queues, complete the admitted workload, preserve authorization/citation correctness, and survive the defined failure test. Use enough generation time after an arrival burst to observe completion; never stop at admission.
 
+Include upload-version overwrite races, job-list rediscovery/pagination under load, pre-aged payload expiry, and restore of a pre-deletion backup with the newer independent journal. A missing/incomplete journal must keep restored access closed; recovery testing includes writer fencing and the final replay checkpoint.
+
 Test worker/pod/node loss, model timeout, broker failover, database failover, Redis unavailability, object/vector errors, and deletion during retries. Verify no cross-owner exposure and no lost durable accepted jobs. Planned overload rejects count separately; report offered-to-completed ratios honestly.
 
 ## 7. Scaling and readiness decisions
@@ -90,6 +100,6 @@ If Streamlit, the available Chroma deployment, or Ollama/Qwen3 serving cannot me
 
 ## 8. Benchmark report template
 
-Record date/commit; region/hardware/GPU/network; replica counts; exact versions/models; corpus; owner/session counts; endpoint mix; input/output distributions; offered/admitted/completed RPS; cache hits; errors/rejections; p50/p95/p99 timings; queue depth/age trend; token rates; database/vector/object metrics; resource utilization and observed cost; faults and recovery; quality/isolation results; pass/fail against predeclared budgets; remaining blockers.
+Record date/commit; region/hardware/GPU/network; replica counts; exact versions/models; corpus; owner/session counts; endpoint mix; input/output distributions; offered/admitted/completed RPS; cache hits; errors/rejections; p50/p95/p99 timings; queue depth/age trend; token rates; database/vector/object metrics; retained job/payload/index/WAL/backup bytes and cleanup throughput/lag; resource utilization and observed cost; faults and recovery; quality/isolation results; pass/fail against predeclared budgets; remaining blockers.
 
 References informing tests: [Streamlit replication](https://docs.streamlit.io/develop/concepts/architecture/architecture), [Chroma distributed architecture](https://docs.trychroma.com/reference/architecture/distributed), [Ollama concurrency and memory configuration](https://docs.ollama.com/faq), and [Kubernetes autoscaling](https://kubernetes.io/docs/concepts/workloads/autoscaling/horizontal-pod-autoscale/). The sizing equations and examples above are derived workload calculations, not capacities stated by those projects.

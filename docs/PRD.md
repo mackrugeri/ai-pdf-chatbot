@@ -1,7 +1,7 @@
 # Product Requirements Document: AI PDF Chatbot
 
 Status: production architecture baseline; not implemented or capacity-certified
-Version: 2.0
+Version: 2.1
 Date: 2026-11-13
 
 ## 1. Purpose and decisions
@@ -34,14 +34,14 @@ First release uses private documents per user; shared workspaces and document sh
 
 | ID | Requirement | Acceptance criterion |
 | --- | --- | --- |
-| FR-01 | Validate bounded PDF uploads. | Reject non-PDF, encrypted/password-protected, oversized, over-page-limit, and entirely textless files with actionable errors; report textless pages in mixed PDFs. |
+| FR-01 | Validate bounded immutable PDF uploads. | Reject non-PDF, encrypted/password-protected, oversized, over-page-limit, and entirely textless files; report textless pages in mixed PDFs. Bind accepted work to verified immutable bytes so reusing an upload target cannot change the indexed/downloaded PDF. |
 | FR-02 | Use durable ingestion jobs. | Accepted work survives API/worker restarts; retries are idempotent and partial indexes never become searchable. |
 | FR-03 | Detect duplicates within an owner. | Identical bytes for one owner return the existing document; another owner's matching file reveals no information about its existence. |
 | FR-04 | Persist document metadata and indexes. | Documents and recent request status/results survive application replica replacement. |
 | FR-05 | Authorize every data operation. | Upload, list, detail, retrieval, download, retry, job status/results, and deletion enforce ownership; forged IDs cannot access another user's data. |
 | FR-06 | Answer only from selected ready documents. | Reject empty/invalid selections; return grounded answers or explicit insufficient-evidence responses. |
 | FR-07 | Return validated citations. | Supported answers include server-resolved filename, 1-based original PDF page index, and exact supplied excerpt; invalid model source IDs are not displayed. |
-| FR-08 | Support reconnectable requests. | UI can recover recent job status and results after reconnect; logout clears browser/session data and access tokens. |
+| FR-08 | Support reconnectable requests. | An owner-scoped paginated jobs API lets the UI rediscover recent jobs and recover available status/results after complete session-state loss; logout clears browser/session data and access tokens. |
 | FR-09 | Delete safely across services. | Once deletion is accepted, new retrieval/result reads exclude the document; eventual file/vector/result cleanup is tracked and retried. |
 | FR-10 | Apply quotas and overload handling. | Per-user and global limits are enforced across replicas; saturation returns a retryable response rather than unbounded queues. |
 | FR-11 | Treat PDF instructions as untrusted content. | Model has no action tools; adversarial evaluation checks that document instructions do not override the question or system rules. |
@@ -64,8 +64,9 @@ Deferred product features: OCR, complex table/chart reconstruction, semantic dup
 | NFR-04 | Durable recovery. | Worker death, broker outage, duplicate delivery, and partial storage failure tests preserve accepted jobs or expose explicit recoverable failure. |
 | NFR-05 | Reproducible delivery. | Locked dependencies, immutable images, versioned migrations, staging, automated checks, rollback, and model/index identities are documented and exercised. |
 | NFR-06 | Bounded resource use. | Enforce request/file/token limits, admission quotas, bounded pools, job deadlines, and isolated PDF processing. |
-| NFR-07 | Recovery and retention. | Encrypted backups and a restore drill demonstrate a proposed RPO of 1 hour and RTO of 4 hours; deletion tombstones are reapplied before restored data is exposed. |
+| NFR-07 | Recovery and retention. | Encrypted backups and a restore drill demonstrate a proposed RPO of 1 hour and RTO of 4 hours; a deletion journal protected independently of database recovery is replayed through a verified cutover point before restored data is exposed. |
 | NFR-08 | Operational readiness. | Dashboards, alerts, runbooks, readiness/liveness, and a named operational owner exist before release. |
+| NFR-09 | Sustainable job/result retention. | Size hot metadata, indexes, receipts, payloads, WAL/replicas, backups, and cleanup at admitted job rate; prove retention does not cause unbounded storage, block active work, or allow duplicate jobs after payload expiry. |
 
 RPO/RTO are initial project targets, not measured guarantees. Availability and latency SLOs must be agreed with a concrete workload and infrastructure budget before release; unresolved SLOs block capacity certification.
 
@@ -75,6 +76,8 @@ Maintain a tuning dataset separate from a frozen, versioned release set of at le
 
 Other release gates: no unauthorized cross-user results; no lost accepted jobs in fault tests; deletion remains effective across retries and restore; setup and rollback drills pass; critical exploitable findings are resolved; relevant dependency/model licenses are reviewed; the exact capacity profile and SLOs pass on representative resources. A 20-question development smoke set may still be useful, but is not production certification.
 
+Additional regression gates: mutate an upload during/after completion and verify only the pinned bytes are indexed; reconnect with no remembered job IDs and rediscover only the authenticated owner's recent jobs; restore a backup older than an acknowledged deletion and verify current journal replay prevents resurrection; run sustained job expiry/partition cleanup and ensure idempotency receipts outlive the retry horizon. See the technical design for exact contracts.
+
 ## 8. Open decisions and release scope
 
-Before sizing/signoff, record endpoint mix (including a 100% chat scenario), prompt/output lengths, data volume, upload rate, session count, latency SLOs, availability window, retention policy, provider/region, GPU budget, identity provider, and the supported Chroma deployment. Measure Streamlit's session and upload behavior at target scale. If any selected component cannot meet the profile, record the blocker and request an explicit stack change; do not label the system ready by bypassing that component in tests.
+Before sizing/signoff, record explicit values/selected providers and an accountable owner for each open decision: endpoint mix (including a 100% chat scenario), prompt/output lengths, data volume, upload rate, session count, latency SLOs, availability window, retention policy, provider/region, GPU budget, identity provider, supported Chroma deployment, immutable-object mechanism, independent deletion-journal protection/cutover, and job/result storage and cleanup budgets. Do not substitute guessed values for these release-blocking decisions. Measure Streamlit's session and upload behavior at target scale. If any selected component cannot meet the profile, record the blocker and request an explicit stack change; do not label the system ready by bypassing that component in tests.

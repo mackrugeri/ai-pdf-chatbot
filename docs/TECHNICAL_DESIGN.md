@@ -1,7 +1,7 @@
 # Technical Design Document: AI PDF Chatbot
 
 Status: production architecture baseline; not implemented or load-certified
-Version: 2.0
+Version: 2.1
 Date: 2026-11-13
 
 Requirements: [PRD.md](PRD.md). Choices: [TECH_STACK.md](TECH_STACK.md). Sizing: [CAPACITY_PLAN.md](CAPACITY_PLAN.md). Delivery: [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md).
@@ -36,7 +36,7 @@ Browser -> TLS ingress / rate limits
 All services -> sanitized metrics/logs/traces -> operational monitoring
 ```
 
-API/UI processes do not run ingestion or model generation. Queue messages carry job IDs, not PDF text or tokens. Workers read job ownership and payload from PostgreSQL. UI never accesses application databases or inference endpoints directly. Durable authoritative files live in object storage, not replica-local paths. Chroma runs as a separately operated service with a validated deployment topology, not an embedded index copied into each API pod.
+API/UI processes do not run ingestion or model generation. Queue messages carry job IDs, not PDF text or tokens. Workers read ownership and payload references from PostgreSQL, then fetch authorized immutable payload objects from private storage. UI never accesses application databases or inference endpoints directly. Durable authoritative files live in object storage, not replica-local paths. Chroma runs as a separately operated service with a validated deployment topology, not an embedded index copied into each API pod.
 
 ## 2. Authentication and authorization
 
@@ -53,13 +53,22 @@ Use PostgreSQL with Psycopg 3, bounded pools, and a measured PgBouncer connectio
 Proposed tables:
 
 - `users`: internal ID, issuer, subject, active state; unique `(issuer, subject)`.
-- `documents`: ID, owner ID, original filename, private object key, SHA-256, page/textless-page/chunk counts, status, active version, index fingerprint, error code, timestamps; unique `(owner_id, sha256)` for live documents.
+- `documents`: ID, owner ID, original filename, private immutable object key/version ID, verified size, SHA-256, page/textless-page/chunk counts, status, active version, index fingerprint, error code, timestamps; unique `(owner_id, sha256)` for live documents.
 - `document_versions`: immutable version/index identity, expected chunk count, artifact references, publication state.
-- `jobs`: ID, owner ID, type, document/version references, bounded payload, state, idempotency key/hash, deadline, attempt count, lease token/expiry, heartbeat, result/error reference, timestamps.
+- `jobs`: ID, owner ID, type, document/version references, bounded control metadata and payload object reference, state, idempotency key/hash, deadline, attempt count, lease token/expiry, heartbeat, result/error reference, timestamps.
 - `outbox`: event ID, job ID, publication state, retry timestamps; committed with job creation.
+- `idempotency_receipts`: owner, endpoint, key, request hash, job/resource reference, and expiry; kept separately from expiring result payloads so payload cleanup cannot turn a safe retry into duplicate work.
 - `audit_events` and `deletion_tombstones`: minimal actor/action/resource/time metadata, without excerpts or questions.
 
 Index owner/time listing, job state/deadline, outbox publication, and ownership/reference lookups. Use keyset pagination; avoid unbounded result lists. Benchmark job/result write amplification and retention cleanup.
+
+### Job and result storage budget
+
+At 5,000 newly accepted jobs/second, a 24-hour window contains 432 million jobs before retries, outbox events, receipts, or indexes. This is a conditional fresh-job scenario, not an assumption that every API request creates a job. Keep hot PostgreSQL rows limited to control/status metadata and authorized object references. Store bounded question/result payloads and excerpts in private encrypted object storage, not repeated in status rows, broker messages, or list responses. Publication must reference a fully written verified object; orphan reconciliation removes unreferenced payloads.
+
+Use time-partitioned job/event history and retention-aligned object prefixes/lifecycle rules. Finalize partition intervals, lookup routing, global uniqueness/idempotency constraints, and active-job handling with migration tests before implementation signoff; partitioning must not weaken duplicate protection or drop running jobs. Separate active control records from expiring terminal history where required. Keep idempotency receipts for the documented retry horizon even when payloads expire; a retry can report an expired result but must not silently create new work.
+
+Measure row/index/payload sizes, database WAL and replica volume, object request overhead, and backup amplification. Set explicit disk/storage and cleanup-throughput budgets in the workload configuration. Partition rotation and bounded cleanup must keep pace with admitted work without long blocking deletes. Track expired-but-not-purged bytes, oldest cleanup item, and storage high-water marks; throttle admission before exhaustion. A 24-hour payload TTL remains proposed until the capacity report proves its cost and cleanup feasibility.
 
 Object keys use generated owner/document/version IDs; user filenames are display-only. Keep a private staging prefix, final PDF objects, and optional extracted-text artifacts. Enforce encryption at rest, private access, bounded short-lived signed URLs, checksums, and lifecycle cleanup of abandoned uploads. Signed URLs are not revocable after issuance: set short TTLs and authorize issuance; no object key is a substitute for ownership checks.
 
@@ -67,13 +76,17 @@ Object keys use generated owner/document/version IDs; user filenames are display
 
 1. Authenticated client initiates an upload with size/name metadata and idempotency key. API reserves quota and creates a pending owner-scoped document/upload record.
 2. Return a bounded upload target. The Streamlit server streams bytes to private object storage without retaining the full file in its own long-lived state. Prototype direct-to-object browser uploads only if compatible with the selected Streamlit flow; do not assume this exists automatically.
-3. Complete-upload verifies stored size/checksum and schedules a durable job in the same PostgreSQL transaction as an outbox event. Byte-identical owner duplicates return the existing document; delete abandoned objects and release reservations.
+3. Complete-upload pins the exact staging object version and verifies that version's actual size and SHA-256. Promote only those verified bytes to a generated final object in a server-write-only namespace; persist the final object key/version, size, and hash. Workers and downloads read that pinned final version, never the mutable staging key or its latest version. Only after promotion and verification does a PostgreSQL transaction create the durable job and outbox event. Byte-identical owner duplicates return the existing document; delete abandoned objects and release reservations. A crash between promotion and transaction commit leaves an orphan for reconciliation, not a searchable document.
 4. Outbox publishers send persistent job IDs with broker publisher confirms and then mark published. A crash between publish and marking can duplicate delivery; workers must be idempotent.
 5. Ingestion workers claim job attempts with database leases. Parse PDFs in restricted subprocesses/containers with CPU, memory, time, file-size, and network limits. Validate actual PDF content, encryption, page count, total extracted text, and supported scope.
 6. Extract page-level text, preserving original 1-based PDF indices including blank-page gaps. Make deterministic page-bounded overlapping chunks with guaranteed progress.
 7. Embed bounded batches using the pinned embedding identity and dedicated embedding capacity. Disable silent truncation; fail clearly for unsupported input size.
 8. Upsert deterministic versioned chunk IDs to Chroma. Verify expected records, then atomically publish the ready version in PostgreSQL, guarded by attempt lease/version and document not-deleting state.
 9. Failure/retry never exposes partial indexes. Reconciler cleans orphan versions/objects and detects stalled jobs. Retry transient failures with capped exponential backoff/jitter; invalid files fail permanently with useful messages.
+
+### Immutable upload acceptance
+
+Presigned upload targets grant writes only to staging, never final objects. URL expiry alone is not a one-use or immutability guarantee. Require version-specific reads/copies or another provider-supported atomic freeze mechanism that has been tested; an unversioned HEAD followed by a read/copy of the latest key is insufficient. Final writes use create-only semantics and a distinct service role where supported. Completion is idempotent and binds its job to one verified object identity. Mutating/reusing the staging URL after completion cannot change accepted bytes or revive a deleted document. Test concurrent overwrite during completion, overwrite after acceptance, duplicate completion, and crash/retry around promotion.
 
 Initial limits retained for testing: 20 MiB/file, 300 pages/file, 2 million extracted characters, 2,000 question characters, and 10 selected documents. They are service defaults, not a capacity promise. Tenant storage/upload/job quotas and global queue budgets must be selected from the capacity model before release.
 
@@ -99,11 +112,17 @@ Before publishing and before serving results, recheck user/document status. Dele
 
 ## 7. Deletion, retention, and consistency
 
-DELETE transaction tombstones the owner-scoped document, invalidates versions, cancels related jobs, records an outbox cleanup job, and returns `202`. New list/retrieval/download/result reads exclude it immediately. A bounded in-flight response that crossed the final authorization check before deletion may finish; deletion cannot retract bytes already sent or previously issued signed URLs. Document this boundary explicitly.
+Deletion uses an idempotent operation ID. First append a minimal deletion intent to an encrypted append-only recovery journal in an independently protected object-storage account/bucket or equivalent service, outside the application database backup/rollback boundary. Confirm durable journal persistence before acknowledging deletion. Then a PostgreSQL transaction tombstones the owner-scoped document, invalidates versions, cancels related jobs, and records an outbox cleanup job; return `202` only after both steps succeed. If journal persistence fails, return a retryable error without claiming acceptance. If journal persistence succeeds but the database transaction fails, retain/reconcile the intent and conservatively apply it during recovery; repeating the same operation must be safe. New list/retrieval/download/result reads exclude it immediately. A bounded in-flight response that crossed the final authorization check before deletion may finish; deletion cannot retract bytes already sent or previously issued signed URLs. Document this boundary explicitly.
 
 Cleanup workers remove PDF/artifact objects, vector versions, affected saved answers/excerpts, and cache entries; retries and deletion status remain visible. Stale ingestion/answer workers cannot republish deleted data because publication is guarded by current database state and attempt/version tokens. Keep minimal tombstones until all live stores, replicas, caches, and applicable backup retention windows are covered.
 
 Proposed defaults: request/result payloads 24 hours, abandoned uploads 1 hour, sanitized operational logs/audit events 30 days, encrypted backups 30 days; retained document originals persist until user deletion. Finalize these before release. Backups are not instantly erased on a delete: disclose expiry policy, restrict access, and reapply tombstones before any restored environment is served. Document metadata can be minimized after cleanup while retaining the deletion ledger needed to prevent resurrection.
+
+### Independent deletion journal and restore gate
+
+Journal entries contain operation ID, owner/document/version identity, timestamp, and integrity metadata only; never questions, excerpts, filenames, or credentials. Normal application roles cannot rewrite/delete journal history or disable its retention. Retain entries longer than every restorable backup/snapshot plus the maximum restore lag and a documented safety margin. Do not apply the generic 30-day log TTL to this ledger. Select and verify the provider's durability, append/overwrite protection, encryption-key recovery, and complete-enumeration guarantees before release.
+
+A restore starts with all user access and job dispatch disabled. Restore the database/object/vector snapshots, replay the current independent journal (including intents newer than the database recovery point), invalidate referenced results/caches/versions, and reconcile physical cleanup before readiness. Record the replay checkpoint and verify journal coverage; missing/unreadable journal, unverified coverage, or failed replay keeps the environment closed. Capture a durable cutoff and replay through it before promotion; fence/drain old writers and prevent split-brain deletion acceptance during cutover so no intent can fall between the checkpoint and reopening. Test a deletion acknowledged after the chosen backup timestamp, then restore that older backup and prove the document remains inaccessible.
 
 ## 8. Versioned API
 
@@ -122,8 +141,11 @@ Protected prefix: `/api/v1`. Bearer access token on every data route. Common err
 | `POST /api/v1/documents/{id}/retry` | Retry eligible failed ingestion -> `202`; requires intact original and compatible configuration. |
 | `DELETE /api/v1/documents/{id}` | Tombstone + cleanup -> `202` deletion job; repeated delete returns existing deletion status. |
 | `POST /api/v1/chat` | `{question,document_ids}` + idempotency key -> `202` answer job, not a completed answer. |
+| `GET /api/v1/jobs` | Owner-scoped recent job summaries with bounded `limit` (default 20, maximum 100), optional `state`/`type` filters, and opaque keyset `cursor`; no payload/excerpts in list results. |
 | `GET /api/v1/jobs/{id}` | Owner-scoped state/progress, polling hint, expiry, and result when complete. Supports ETag/conditional reads. |
 | `POST /api/v1/jobs/{id}/cancel` | Idempotent cancellation request; running operations stop at safe checkpoints. |
+
+Job discovery response: `{jobs:[{id,type,state,created_at,updated_at,expires_at,result_available}],next_cursor}` sorted by `(created_at DESC,id DESC)`. Cursor binds the authenticated owner, filters, and snapshot upper bound; reject malformed/tampered/filter-mismatched cursors and enforce ownership independently of cursor contents. After login/reconnect the UI discovers recent jobs through this route, then fetches selected job detail; it must not depend on browser-held job IDs. Expired content is never returned; retained expired metadata can report unavailable results until metadata retention ends. Test identical timestamps, page boundaries, concurrent arrivals, cross-owner filters/cursors, and reconnect with entirely empty session state.
 
 Chat result: `{answer,insufficient_evidence,sources:[{source_id,chunk_id,document_id,document_version,filename,page_number,excerpt}]}`. Jobs: queued/running/retrying/succeeded/failed/cancelling/cancelled/expired. Documents: uploading/queued/processing/ready/failed/deleting/deleted. Deleted tombstone access exposes only sanitized owner deletion status, not old content.
 
@@ -131,7 +153,7 @@ HTTP mappings: `401` invalid/missing token; `403` missing operation scope; `404`
 
 ## 9. UI and caching at scale
 
-Streamlit retains UI responsibility. Load balancer must support WebSockets, sticky sessions, trusted forwarded headers, consistent cookie secrets, and appropriate timeouts. Replica termination drains connections; reconnect restores recent request status from the API rather than assuming session state is durable. Replicas share no user data through global caches. Built-in upload buffering and rerun costs must be profiled, even if object storage is the durable destination.
+Streamlit retains UI responsibility. Load balancer must support WebSockets, sticky sessions, trusted forwarded headers, consistent cookie secrets, and appropriate timeouts. Replica termination drains connections; reconnect uses the owner-scoped paginated job-list API to rediscover recent requests and fetch their status rather than assuming session state or remembered job IDs are durable. Replicas share no user data through global caches. Built-in upload buffering and rerun costs must be profiled, even if object storage is the durable destination.
 
 Poll only active jobs with server hints, exponential backoff, jitter, and conditional reads; never poll all documents from all idle sessions every two seconds. Count polling and auth traffic in total offered load. On logout/token expiry, discard user session data and stop protected calls until reauthentication. Render model/PDF content safely without unsafe HTML. Client errors must not cause automatic duplicate job submission.
 
@@ -143,11 +165,11 @@ PostgreSQL needs tested standby/failover, backups/PITR, and connection limits. B
 
 Use OpenTelemetry request/job correlation and sanitized logs, Prometheus metrics, and Grafana dashboards. Track offered/admitted/completed RPS by endpoint, p50/p95/p99 latency, queue age, retries, outstanding jobs, token rates, GPU memory, DB pools/replication lag, vector latency, upload throughput, deletion backlog, and backup freshness. Alert on SLO burn, stalled queues, model failures, pool saturation, and lost backup/replication health. Do not use user/document IDs as high-cardinality metric labels.
 
-Release through CI checks -> immutable images/scans -> isolated staging -> migration compatibility -> real-model evaluations -> capacity/fault tests -> canary -> monitored promotion or rollback. Restore drills cover PostgreSQL, objects, deletion ledger, model/index identity, and Chroma snapshots/rebuilds. Rebuild duration must fit RTO; otherwise maintain a tested restorable vector snapshot. [CAPACITY_PLAN.md](CAPACITY_PLAN.md) defines proof required before any 5,000-RPS claim.
+Release through CI checks -> immutable images/scans -> isolated staging -> migration compatibility -> real-model evaluations -> capacity/fault tests -> canary -> monitored promotion or rollback. Restore drills cover PostgreSQL, objects, the independently protected current deletion journal and cutover checkpoint, model/index identity, and Chroma snapshots/rebuilds. Rebuild duration must fit RTO; otherwise maintain a tested restorable vector snapshot. [CAPACITY_PLAN.md](CAPACITY_PLAN.md) defines proof required before any 5,000-RPS claim.
 
 ## 11. Verification and unresolved decisions
 
-Automate owner isolation, version filtering, pagination/idempotency, duplicate delivery, lease fencing, worker death, object/vector partial failure, deleting-during-generation, token expiry/key rotation, and migration compatibility tests. Use temporary object/vector namespaces and separate real service databases. Run browser/WebSocket tests for Streamlit; API-only tests do not prove the UI path.
+Automate immutable-upload overwrite/completion races, owner-scoped job rediscovery after full session loss, pre-deletion-backup restore with newer journal replay, high-volume payload expiry/idempotency retention, owner isolation, version filtering, pagination/idempotency, duplicate delivery, lease fencing, worker death, object/vector partial failure, deleting-during-generation, token expiry/key rotation, and migration compatibility tests. Use temporary object/vector namespaces and separate real service databases. Run browser/WebSocket tests for Streamlit; API-only tests do not prove the UI path.
 
 Before release resolve workload mix/SLOs, corpus/session sizes, hosting/GPU budget, identity provider, object-storage provider, exact Chroma topology, retention, and measured autoscaling thresholds. Preserve main-stack choices unless the owner approves a change after evidence. This document supersedes the in-process queue, process-local locks, local-only uploads, and single-worker architecture from version 1.
 
