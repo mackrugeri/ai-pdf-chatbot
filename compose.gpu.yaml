@@ -1,0 +1,11 @@
+# Optional NVIDIA/Linux override, not for local CPU-only or Docker-on-Mac use.
+# Requires a working GPU driver and NVIDIA Container Toolkit on the Docker host.
+services:
+  ollama:
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
