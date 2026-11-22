@@ -102,6 +102,22 @@ services:
       - ollama-data:/root/.ollama
     # CPU-only by default. Native Ollama is also supported on the host.
 
+  api:
+    build:
+      context: .
+      target: runtime
+    image: ai-pdf-chatbot:dev
+    profiles: [api]
+    init: true
+    environment:
+      APP_ENV: ${APP_ENV:-development}
+    ports:
+      - "127.0.0.1:${API_PORT:-8000}:8000"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    # The API shell does not open service connections or report ready yet.
+
   workspace:
     build:
       context: .

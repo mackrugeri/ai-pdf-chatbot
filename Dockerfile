@@ -31,6 +31,6 @@ COPY --from=builder /opt/venv /opt/venv
 WORKDIR /app
 COPY --chown=appuser:appuser . /app
 USER appuser
-# No application entry point exists yet. This is a build/smoke-test default.
-# API, UI and worker commands will be wired when their modules are implemented.
-CMD ["python", "--version"]
+# Only the API shell exists; service/auth integrations remain unimplemented.
+EXPOSE 8000
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
