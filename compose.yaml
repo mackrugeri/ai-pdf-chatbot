@@ -108,9 +108,13 @@ services:
       target: runtime
     image: ai-pdf-chatbot:dev
     profiles: [api]
+    env_file:
+      - path: .env
+        required: false
     init: true
     environment:
       APP_ENV: ${APP_ENV:-development}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-aipdf}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-aipdf}
     ports:
       - "127.0.0.1:${API_PORT:-8000}:8000"
     security_opt:
@@ -124,11 +128,14 @@ services:
       target: runtime
     image: ai-pdf-chatbot:dev
     profiles: [dev]
+    env_file:
+      - path: .env
+        required: false
     init: true
     working_dir: /app
     command: ["sleep", "infinity"]
     environment:
-      APP_ENV: development
+      APP_ENV: ${APP_ENV:-development}
       MODEL_BACKEND: ${MODEL_BACKEND:-fake}
       DATABASE_URL: postgresql://${POSTGRES_USER:-aipdf}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-aipdf}
       BROKER_URL: amqp://${RABBITMQ_USER:-aipdf}:${RABBITMQ_PASSWORD:?Set RABBITMQ_PASSWORD in .env}@rabbitmq:5672/${RABBITMQ_VHOST:-aipdf}

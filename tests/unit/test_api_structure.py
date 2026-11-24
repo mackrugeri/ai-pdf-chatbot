@@ -191,7 +191,11 @@ def test_openapi_exposes_bearer_auth_and_typed_contracts(client):
 
 
 def test_interactive_docs_are_disabled_in_production():
-    api = create_app(Settings(app_env="production", _env_file=None))
+    api = create_app(
+        Settings(app_env="test", _env_file=None).model_copy(
+            update={"app_env": "production"}
+        )
+    )
     with TestClient(api) as test_client:
         for path in ["/docs", "/redoc", "/openapi.json"]:
             assert test_client.get(path).status_code == 404
