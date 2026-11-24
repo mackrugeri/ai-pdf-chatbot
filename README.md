@@ -81,3 +81,15 @@ All data routes fail closed: no Bearer token returns `401`; token verification i
 Docker alternative: `docker compose --profile api up --build -d api` exposes the same shell on localhost:8000. It starts without database/model connections and does not claim readiness. Interactive docs are disabled when `APP_ENV=production`; use real production validation before any deployment.
 
 Configuration code lives in `app/config/`; `from app.config import Settings` remains the application entry point. Component settings load `.env`, with process environment overriding it. Connection secrets are masked in representations/JSON; validation errors hide inputs. Optional development services may remain unconfigured; production requires their configuration. Validation does not establish connectivity, wire token verification, or make readiness true. Never log raw secrets or unredacted validation error dictionaries.
+
+| Configuration module | Owns |
+| --- | --- |
+| `app/config/database.py` | Secret PostgreSQL URL, bounded pool/connect timeouts. |
+| `app/config/broker.py` | Secret RabbitMQ URL, distinct queues, bounded retries/prefetch. |
+| `app/config/redis.py` | Secret Redis URL, database index, bounded connections/timeouts. |
+| `app/config/models.py` | Fake/Ollama mode, model identities, separate endpoints, context/output/concurrency budgets. |
+| `app/config/auth.py` | Issuer/audience/JWKS, asymmetric algorithm allowlist, timeout/cache/skew limits. |
+| `app/config/chroma.py` | Host/port/TLS, tenant/database, optional gateway token. |
+| `app/config/object_storage.py` | Object/journal endpoints, buckets, paired secret keys, signed-URL expiry and independence declaration. |
+
+Blank optional `.env` values are ignored for local scaffolding. Production validation requires configured database/broker/Redis, real model mode, HTTPS OIDC, Chroma host, and HTTPS object/journal endpoints with an independent journal declaration. A declaration cannot prove account/retention isolation; verify it when provisioning. Explicit storage key pairs are optional for future SDK workload identity. Settings perform no network calls and still do not activate authentication, workers, storage or readiness.
