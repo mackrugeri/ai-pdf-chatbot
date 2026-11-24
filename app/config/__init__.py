@@ -1,7 +1,8 @@
-"""Component settings, composed into one backward-compatible application Settings."""
+"""Component settings; loading configuration performs no service I/O."""
 
+from app.config.broker import BrokerSettings
 from app.config.database import DatabaseSettings
 
 
-class Settings(DatabaseSettings):
-    """Validated application configuration. Loading settings performs no service I/O."""
+class Settings(DatabaseSettings, BrokerSettings):
+    """Validated, hardware-neutral application settings."""
