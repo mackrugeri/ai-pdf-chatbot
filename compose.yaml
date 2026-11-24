@@ -116,6 +116,8 @@ services:
     init: true
     environment:
       APP_ENV: ${APP_ENV:-development}
+      CHROMA_HOST: chroma
+      CHROMA_PORT: "8000"
       MODEL_BACKEND: ${MODEL_BACKEND:-fake}
       OLLAMA_GENERATION_URL: ${DOCKER_OLLAMA_GENERATION_URL:-http://host.docker.internal:11434}
       OLLAMA_QUERY_EMBEDDING_URL: ${DOCKER_OLLAMA_QUERY_EMBEDDING_URL:-http://host.docker.internal:11434}
