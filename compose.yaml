@@ -108,12 +108,20 @@ services:
       target: runtime
     image: ai-pdf-chatbot:dev
     profiles: [api]
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     env_file:
       - path: .env
         required: false
     init: true
     environment:
       APP_ENV: ${APP_ENV:-development}
+      MODEL_BACKEND: ${MODEL_BACKEND:-fake}
+      OLLAMA_GENERATION_URL: ${DOCKER_OLLAMA_GENERATION_URL:-http://host.docker.internal:11434}
+      OLLAMA_QUERY_EMBEDDING_URL: ${DOCKER_OLLAMA_QUERY_EMBEDDING_URL:-http://host.docker.internal:11434}
+      OLLAMA_INGESTION_EMBEDDING_URL: ${DOCKER_OLLAMA_INGESTION_EMBEDDING_URL:-http://host.docker.internal:11434}
+      GENERATION_MODEL: ${GENERATION_MODEL:-qwen3:4b}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-nomic-embed-text}
       REDIS_URL: redis://:${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env}@redis:6379/0
       BROKER_URL: amqp://${RABBITMQ_USER:-aipdf}:${RABBITMQ_PASSWORD:?Set RABBITMQ_PASSWORD in .env}@rabbitmq:5672/${RABBITMQ_VHOST:-aipdf}
       DATABASE_URL: postgresql://${POSTGRES_USER:-aipdf}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-aipdf}
@@ -144,11 +152,11 @@ services:
       REDIS_URL: redis://:${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env}@redis:6379/0
       CHROMA_HOST: chroma
       CHROMA_PORT: "8000"
-      OLLAMA_GENERATION_URL: ${OLLAMA_GENERATION_URL:-http://host.docker.internal:11434}
-      OLLAMA_QUERY_EMBEDDING_URL: ${OLLAMA_QUERY_EMBEDDING_URL:-http://host.docker.internal:11434}
-      OLLAMA_INGESTION_EMBEDDING_URL: ${OLLAMA_INGESTION_EMBEDDING_URL:-http://host.docker.internal:11434}
-      GENERATION_MODEL: qwen3:4b
-      EMBEDDING_MODEL: nomic-embed-text
+      OLLAMA_GENERATION_URL: ${DOCKER_OLLAMA_GENERATION_URL:-http://host.docker.internal:11434}
+      OLLAMA_QUERY_EMBEDDING_URL: ${DOCKER_OLLAMA_QUERY_EMBEDDING_URL:-http://host.docker.internal:11434}
+      OLLAMA_INGESTION_EMBEDDING_URL: ${DOCKER_OLLAMA_INGESTION_EMBEDDING_URL:-http://host.docker.internal:11434}
+      GENERATION_MODEL: ${GENERATION_MODEL:-qwen3:4b}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-nomic-embed-text}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
