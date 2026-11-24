@@ -114,6 +114,7 @@ services:
     init: true
     environment:
       APP_ENV: ${APP_ENV:-development}
+      REDIS_URL: redis://:${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env}@redis:6379/0
       BROKER_URL: amqp://${RABBITMQ_USER:-aipdf}:${RABBITMQ_PASSWORD:?Set RABBITMQ_PASSWORD in .env}@rabbitmq:5672/${RABBITMQ_VHOST:-aipdf}
       DATABASE_URL: postgresql://${POSTGRES_USER:-aipdf}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-aipdf}
     ports:
