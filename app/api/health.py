@@ -1,7 +1,8 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 
 from app.api.errors import APIError
 from app.schemas.common import HealthResponse
+from app.storage.postgres.connection import DatabasePool
 
 router = APIRouter(prefix="/health", tags=["health"])
 
@@ -12,7 +13,11 @@ async def liveness() -> HealthResponse:
 
 
 @router.get("/ready", response_model=HealthResponse)
-async def readiness() -> HealthResponse:
-    # Do not report ready until real storage/schema/service initialization exists.
-    # This public response is intentionally minimal; no dependency details are exposed.
-    raise APIError(503, "NOT_READY", "Service initialization is not implemented yet.")
+async def readiness(request: Request) -> HealthResponse:
+    # Readiness is cheap and requires connectivity plus the migration ledger.
+    pool: DatabasePool | None = request.app.state.database_pool
+    if pool is None or not await pool.is_ready():
+        raise APIError(
+            503, "NOT_READY", "Required database initialization is unavailable."
+        )
+    return HealthResponse(status="ready")

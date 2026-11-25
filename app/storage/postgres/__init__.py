@@ -1,1 +1,1 @@
-"""PostgreSQL metadata repositories. No connection or query implementation yet."""
+"""PostgreSQL connection pool and versioned migration primitives."""

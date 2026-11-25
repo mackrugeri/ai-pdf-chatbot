@@ -19,7 +19,7 @@ Local development does not require a dedicated GPU. Use deterministic tests and 
 
 The future 1,000–5,000 requests/second objective is **unverified**. Local implementation, deployment configuration and measured production capacity are separate achievements. Never present fake-model tests as semantic accuracy or target-rate proof.
 
-Setup/test commands will be added when their implementation exists. Commit only permitted fixtures and safe configuration examples; keep uploaded PDFs, credentials, model files, databases and private logs out of Git.
+The PostgreSQL pool and versioned schema migrations are implemented. The API remains a scaffold; commit only permitted fixtures and safe configuration examples, and keep uploaded PDFs, credentials, model files, databases and private logs out of Git.
 
 ## Configuration
 
@@ -54,6 +54,9 @@ The default starts **PostgreSQL + Redis**. All published ports bind to localhost
 
 ```bash
 docker compose --profile jobs --profile vectors up -d
+# In a second terminal, from the project virtual environment:
+source .venv/bin/activate
+python -m app.storage.postgres.migrate
 docker compose --profile dev run --build --rm workspace bash
 ```
 
@@ -74,11 +77,11 @@ uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 .venv/bin/python -m pytest -q
 ```
 
-Development documentation: [Swagger UI](http://127.0.0.1:8000/docs). Liveness is `GET /health/live`; readiness intentionally returns `503` until service initialization is implemented. Versioned routes under `/api/v1` cover uploads, documents, chat, jobs and capabilities, with typed schemas and a common error envelope/request ID.
+Development documentation: [Swagger UI](http://127.0.0.1:8000/docs). Liveness is `GET /health/live`; readiness returns `200` only when PostgreSQL is reachable and the migration ledger exists. Run migrations explicitly before starting the API; migrations are never applied implicitly at API startup. Versioned routes under `/api/v1` cover uploads, documents, chat, jobs and capabilities, with typed schemas and a common error envelope/request ID.
 
 All data routes fail closed: no Bearer token returns `401`; token verification is not wired, so an arbitrary Bearer token returns `503`, never user access. Route shells return `501` after authentication is replaced in isolated tests. No jobs, documents, model answers or database writes are fabricated. This shell is not production-ready authentication or storage integration.
 
-Docker alternative: `docker compose --profile api up --build -d api` exposes the same shell on localhost:8000. It starts without database/model connections and does not claim readiness. Interactive docs are disabled when `APP_ENV=production`; use real production validation before any deployment.
+Docker alternative: after starting PostgreSQL and running migrations, `docker compose --profile api up --build -d api` exposes the shell on localhost:8000. The API opens a bounded PostgreSQL pool at startup and fails startup if PostgreSQL is configured but unavailable. Model, identity, queue and storage integrations remain incomplete. Interactive docs are disabled when `APP_ENV=production`; use real production validation before any deployment.
 
 Configuration code lives in `app/config/`; `from app.config import Settings` remains the application entry point. Component settings load `.env`, with process environment overriding it. Connection secrets are masked in representations/JSON; validation errors hide inputs. Optional development services may remain unconfigured; production requires their configuration. Validation does not establish connectivity, wire token verification, or make readiness true. Never log raw secrets or unredacted validation error dictionaries.
 
@@ -92,4 +95,8 @@ Configuration code lives in `app/config/`; `from app.config import Settings` rem
 | `app/config/chroma.py` | Host/port/TLS, tenant/database, optional gateway token. |
 | `app/config/object_storage.py` | Object/journal endpoints, buckets, paired secret keys, signed-URL expiry and independence declaration. |
 
-Blank optional `.env` values are ignored for local scaffolding. Production validation requires configured database/broker/Redis, real model mode, HTTPS OIDC, Chroma host, and HTTPS object/journal endpoints with an independent journal declaration. A declaration cannot prove account/retention isolation; verify it when provisioning. Explicit storage key pairs are optional for future SDK workload identity. Settings perform no network calls and still do not activate authentication, workers, storage or readiness.
+Blank optional `.env` values are ignored for local scaffolding. Production validation requires configured database/broker/Redis, real model mode, HTTPS OIDC, Chroma host, and HTTPS object/journal endpoints with an independent journal declaration. A declaration cannot prove account/retention isolation; verify it when provisioning. Explicit storage key pairs are optional for future SDK workload identity. Settings perform no network calls. The API manages PostgreSQL lifecycle/readiness; authentication, workers, object storage and business operations remain incomplete.
+
+### PostgreSQL schema
+
+`python -m app.storage.postgres.migrate` applies ordered SQL migrations under a PostgreSQL advisory lock. It records SHA-256 checksums, refuses changed or missing applied migrations, and applies each migration in a transaction. Add a new numbered migration for schema changes; never edit an applied migration. The API does not run DDL on startup. `DB_POOL_MIN_SIZE`, `DB_POOL_MAX_SIZE`, `DB_CONNECT_TIMEOUT_SECONDS` and `DB_POOL_TIMEOUT_SECONDS` bound each API process pool; deployment must budget the sum across all API replicas against the database connection limit. The current default pool is a development baseline, not a 1,000–5,000 RPS capacity claim.
