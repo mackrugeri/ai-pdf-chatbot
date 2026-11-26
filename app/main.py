@@ -1,4 +1,4 @@
-"""FastAPI application factory. No database/model connections open on import."""
+"""FastAPI application factory. No network or database connections open on import."""
 
 import logging
 from collections.abc import AsyncIterator
@@ -12,6 +12,7 @@ from starlette.responses import Response
 from app.api.errors import APIError, error_response, register_error_handlers
 from app.api.health import router as health_router
 from app.api.v1.router import router as api_router
+from app.auth.verifier import OIDCTokenVerifier
 from app.config import Settings
 from app.schemas.common import ErrorResponse
 from app.storage.postgres.connection import DatabasePool
@@ -26,20 +27,27 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(application: FastAPI) -> AsyncIterator[None]:
         database_pool = None
-        if config.database_url is not None:
-            database_pool = DatabasePool(config)
-            await database_pool.open()
-        application.state.database_pool = database_pool
+        oidc_verifier = None
         try:
+            if config.database_url is not None:
+                database_pool = DatabasePool(config)
+                await database_pool.open()
+            if config.oidc_issuer and config.oidc_audience and config.oidc_jwks_url:
+                oidc_verifier = OIDCTokenVerifier(config)
+                await oidc_verifier.open()
+            application.state.database_pool = database_pool
+            application.state.oidc_verifier = oidc_verifier
             yield
         finally:
+            if oidc_verifier is not None:
+                await oidc_verifier.close()
             if database_pool is not None:
                 await database_pool.close()
 
     application = FastAPI(
         title=config.app_name,
         version="0.1.0",
-        description="API scaffold; document, model and identity integrations are incomplete.",
+        description="Protected API scaffold with OIDC access-token verification.",
         docs_url="/docs" if development_docs else None,
         redoc_url="/redoc" if development_docs else None,
         openapi_url="/openapi.json" if development_docs else None,
@@ -49,18 +57,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     application.state.settings = config
     application.state.database_pool = None
+    application.state.oidc_verifier = None
     register_error_handlers(application)
 
     @application.middleware("http")
     async def request_context(
         request: Request, call_next: RequestResponseEndpoint
     ) -> Response:
-        # Generate server-side IDs rather than reflecting arbitrary client headers.
         request.state.request_id = uuid4()
         try:
             response = await call_next(request)
         except Exception:  # noqa: BLE001 - sanitize unexpected request failures
-            # Exception strings/tracebacks can contain credentials or document text.
             logger.error("Unhandled API error; request_id=%s", request.state.request_id)
             response = error_response(
                 request, APIError(500, "INTERNAL_ERROR", "An internal error occurred.")
