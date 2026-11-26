@@ -1,0 +1,63 @@
+{
+  "realm": "ai-pdf-chatbot",
+  "enabled": true,
+  "displayName": "AI PDF Chatbot Local",
+  "sslRequired": "none",
+  "registrationAllowed": false,
+  "loginWithEmailAllowed": true,
+  "roles": {
+    "realm": [
+      { "name": "pdf:read", "description": "Read the user's PDF chatbot resources" },
+      { "name": "pdf:write", "description": "Create or mutate the user's PDF chatbot resources" }
+    ]
+  },
+  "clients": [
+    {
+      "clientId": "aipdf-streamlit-local",
+      "name": "AI PDF Chatbot Streamlit (local)",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "clientAuthenticatorType": "client-secret",
+      "secret": "${KEYCLOAK_STREAMLIT_CLIENT_SECRET}",
+      "publicClient": false,
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "redirectUris": ["http://localhost:8501/oauth2callback"],
+      "webOrigins": ["http://localhost:8501"],
+      "defaultClientScopes": ["web-origins", "acr", "roles", "profile", "email"],
+      "protocolMappers": [
+        {
+          "name": "pdf-api-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.client.audience": "pdf-api",
+            "id.token.claim": "false",
+            "access.token.claim": "true",
+            "introspection.token.claim": "true"
+          }
+        }
+      ]
+    }
+  ],
+  "users": [
+    {
+      "username": "demo",
+      "enabled": true,
+      "emailVerified": true,
+      "firstName": "Local",
+      "lastName": "Demo User",
+      "email": "demo@example.test",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "${KEYCLOAK_DEMO_PASSWORD}",
+          "temporary": false
+        }
+      ],
+      "realmRoles": ["pdf:read", "pdf:write"]
+    }
+  ]
+}

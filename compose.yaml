@@ -102,6 +102,25 @@ services:
       - ollama-data:/root/.ollama
     # CPU-only by default. Native Ollama is also supported on the host.
 
+  keycloak:
+    <<: *service-defaults
+    image: ${KEYCLOAK_IMAGE:-quay.io/keycloak/keycloak:26.8.2}
+    profiles: [auth, api]
+    command: ["start-dev", "--import-realm"]
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KEYCLOAK_ADMIN_USERNAME:-local-admin}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:?Set KEYCLOAK_ADMIN_PASSWORD in .env}
+      KC_HTTP_ENABLED: "true"
+      KC_HOSTNAME: ${KEYCLOAK_PUBLIC_URL:-http://localhost:8080}
+      KEYCLOAK_STREAMLIT_CLIENT_SECRET: ${KEYCLOAK_STREAMLIT_CLIENT_SECRET:?Set KEYCLOAK_STREAMLIT_CLIENT_SECRET in .env}
+      KEYCLOAK_DEMO_PASSWORD: ${KEYCLOAK_DEMO_PASSWORD:?Set KEYCLOAK_DEMO_PASSWORD in .env}
+    ports:
+      - "127.0.0.1:${KEYCLOAK_PORT:-8080}:8080"
+    volumes:
+      - keycloak-data:/opt/keycloak/data
+      - ./auth/ai-pdf-chatbot-realm.json:/opt/keycloak/data/import/ai-pdf-chatbot-realm.json:ro
+    mem_limit: 1g
+
   api:
     build:
       context: .
@@ -129,7 +148,12 @@ services:
       REDIS_URL: redis://:${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env}@redis:6379/0
       BROKER_URL: amqp://${RABBITMQ_USER:-aipdf}:${RABBITMQ_PASSWORD:?Set RABBITMQ_PASSWORD in .env}@rabbitmq:5672/${RABBITMQ_VHOST:-aipdf}
       DATABASE_URL: postgresql://${POSTGRES_USER:-aipdf}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-aipdf}
+      OIDC_ISSUER: ${OIDC_ISSUER:-http://localhost:8080/realms/ai-pdf-chatbot}
+      OIDC_AUDIENCE: ${OIDC_AUDIENCE:-pdf-api}
+      OIDC_JWKS_URL: http://keycloak:8080/realms/ai-pdf-chatbot/protocol/openid-connect/certs
     depends_on:
+      keycloak:
+        condition: service_started
       postgres:
         condition: service_healthy
     ports:
@@ -187,3 +211,4 @@ volumes:
   rabbitmq-data:
   chroma-data:
   ollama-data:
+  keycloak-data:
