@@ -42,7 +42,9 @@ def client(api):
 @pytest.fixture
 def authorized_client(api):
     # Test-only override. Production code never accepts this synthetic principal.
-    api.dependency_overrides[require_principal] = lambda: Principal(UUID(DOCUMENT_ID))
+    api.dependency_overrides[require_principal] = lambda: Principal(
+        UUID(DOCUMENT_ID), frozenset({"pdf:read", "pdf:write"})
+    )
     with TestClient(api) as test_client:
         yield test_client
     api.dependency_overrides.clear()
@@ -200,3 +202,18 @@ def test_interactive_docs_are_disabled_in_production():
         for path in ["/docs", "/redoc", "/openapi.json"]:
             assert test_client.get(path).status_code == 404
         assert test_client.get("/api/v1/jobs").status_code == 401
+
+
+def test_data_route_rejects_a_valid_principal_without_write_scope(api):
+    api.dependency_overrides[require_principal] = lambda: Principal(
+        UUID(DOCUMENT_ID), frozenset({"pdf:read"})
+    )
+    with TestClient(api) as test_client:
+        response = test_client.post(
+            "/api/v1/chat",
+            json={"question": "hello", "document_ids": [DOCUMENT_ID]},
+            headers={"Idempotency-Key": "scope-test"},
+        )
+    api.dependency_overrides.clear()
+    assert response.status_code == 403
+    assert response.json()["error"]["code"] == "INSUFFICIENT_SCOPE"

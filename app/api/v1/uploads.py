@@ -3,21 +3,31 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, status
 
-from app.api.dependencies import idempotency_key
+from app.api.dependencies import idempotency_key, require_scopes
 from app.api.errors import not_implemented
 from app.schemas.documents import UploadCompleted, UploadCreated, UploadRequest
 
 router = APIRouter(prefix="/uploads", tags=["uploads"])
 
 
-@router.post("", response_model=UploadCreated, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "",
+    response_model=UploadCreated,
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(require_scopes("pdf:write"))],
+)
 async def initiate_upload(
     body: UploadRequest, key: Annotated[str, Depends(idempotency_key)]
 ) -> UploadCreated:
     not_implemented("Upload initialization")
 
 
-@router.post("/{upload_id}/complete", response_model=UploadCompleted, status_code=202)
+@router.post(
+    "/{upload_id}/complete",
+    response_model=UploadCompleted,
+    status_code=202,
+    dependencies=[Depends(require_scopes("pdf:write"))],
+)
 async def complete_upload(
     upload_id: UUID, key: Annotated[str, Depends(idempotency_key)]
 ) -> UploadCompleted:
