@@ -1,18 +1,23 @@
-"""Dependency boundaries. No token is treated as verified by this scaffold."""
+"""Authentication and authorization dependencies for protected API routes."""
 
 from dataclasses import dataclass
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import Header, Query, Security
+from fastapi import Depends, Header, Query, Request, Security
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from psycopg import Error as PsycopgError
+from psycopg_pool import PoolTimeout
 
 from app.api.errors import APIError
+from app.auth.verifier import IdentityProviderUnavailable, InvalidAccessToken
 from app.schemas.common import Pagination
+from app.storage.postgres.connection import DatabasePool
+from app.storage.postgres.users import UserRepository
 
 bearer = HTTPBearer(
     auto_error=False,
-    description="API-audience access token. Token verification is not wired yet.",
+    description="Verified OIDC access token issued for the PDF chatbot API.",
 )
 
 
@@ -23,6 +28,7 @@ class Principal:
 
 
 async def require_principal(
+    request: Request,
     credentials: Annotated[HTTPAuthorizationCredentials | None, Security(bearer)],
 ) -> Principal:
     if credentials is None:
@@ -32,9 +38,72 @@ async def require_principal(
             "A Bearer access token is required.",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    # Replace with the real issuer/audience/signature/expiry/active-user checks.
-    # Never accept an arbitrary Bearer string or trust an owner ID from the client.
-    raise APIError(503, "AUTH_NOT_CONFIGURED", "Token verification is not configured.")
+
+    verifier = getattr(request.app.state, "oidc_verifier", None)
+    if verifier is None:
+        raise APIError(
+            503, "AUTH_NOT_CONFIGURED", "Token verification is not configured."
+        )
+    try:
+        identity = await verifier.verify_access_token(credentials.credentials)
+    except InvalidAccessToken:
+        raise APIError(
+            401,
+            "INVALID_ACCESS_TOKEN",
+            "The access token is invalid or expired.",
+            headers={"WWW-Authenticate": 'Bearer error="invalid_token"'},
+        ) from None
+    except IdentityProviderUnavailable:
+        raise APIError(
+            503,
+            "IDENTITY_PROVIDER_UNAVAILABLE",
+            "Token verification is temporarily unavailable.",
+            retryable=True,
+        ) from None
+
+    pool: DatabasePool | None = getattr(request.app.state, "database_pool", None)
+    if pool is None:
+        raise APIError(
+            503, "DATABASE_UNAVAILABLE", "User identity storage is unavailable."
+        )
+    try:
+        user = await UserRepository(pool).resolve(identity.issuer, identity.subject)
+    except (PsycopgError, PoolTimeout):
+        raise APIError(
+            503,
+            "DATABASE_UNAVAILABLE",
+            "User identity storage is temporarily unavailable.",
+            retryable=True,
+        ) from None
+    if not user.is_active:
+        raise APIError(403, "USER_INACTIVE", "This account is disabled.")
+    return Principal(owner_id=user.user_id, scopes=identity.scopes)
+
+
+def require_scopes(*required_scopes: str):
+    required = frozenset(required_scopes)
+    if not required or any(not scope or scope.strip() != scope for scope in required):
+        raise ValueError("At least one non-empty scope is required")
+
+    async def check_scopes(
+        principal: Annotated[Principal, Depends(require_principal)],
+    ) -> Principal:
+        missing = required - principal.scopes
+        if missing:
+            scope_text = " ".join(sorted(required))
+            raise APIError(
+                403,
+                "INSUFFICIENT_SCOPE",
+                "The access token does not grant this operation.",
+                headers={
+                    "WWW-Authenticate": (
+                        f'Bearer error="insufficient_scope", scope="{scope_text}"'
+                    )
+                },
+            )
+        return principal
+
+    return check_scopes
 
 
 def pagination(
