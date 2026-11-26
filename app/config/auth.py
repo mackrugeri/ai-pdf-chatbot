@@ -1,4 +1,4 @@
-"""OIDC verifier configuration only; this does not verify or accept tokens."""
+"""Validated issuer, audience, JWKS and JWT verification settings."""
 
 from pydantic import Field, field_validator, model_validator
 
@@ -13,6 +13,9 @@ class AuthSettings(EnvironmentSettings):
     oidc_clock_skew_seconds: int = Field(default=30, ge=0, le=120)
     oidc_jwks_cache_ttl_seconds: int = Field(default=300, ge=1, le=3600)
     oidc_http_timeout_seconds: float = Field(default=5, gt=0, le=60)
+    oidc_max_token_bytes: int = Field(default=16384, ge=1024, le=65536)
+    oidc_jwks_max_keys: int = Field(default=100, ge=1, le=256)
+    oidc_unknown_kid_refresh_seconds: float = Field(default=5, ge=1, le=60)
 
     @field_validator("oidc_issuer", "oidc_jwks_url")
     @classmethod
