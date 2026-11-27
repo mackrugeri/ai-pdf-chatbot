@@ -1,5 +1,7 @@
 """Authenticated Streamlit interface for the AI PDF chatbot."""
 
+import secrets
+
 import streamlit as st
 
 from ui.api_client import APIClient, APIClientError, AuthenticationExpired
@@ -103,6 +105,85 @@ def _documents_page(api: APIClient) -> None:
         st.rerun()
 
 
+def _chat_page(api: APIClient) -> None:
+    st.header("Ask about your PDFs")
+    documents_response = api.get("/documents", params={"limit": 100})
+    documents = (
+        documents_response.get("items", [])
+        if isinstance(documents_response, dict)
+        else []
+    )
+    ready = [document for document in documents if document.get("status") == "ready"]
+    if not ready:
+        st.info("Upload a PDF and wait until it is ready before asking a question.")
+        return
+    labels = {
+        str(document["id"]): str(document.get("original_filename", "Untitled PDF"))
+        for document in ready
+        if document.get("id")
+    }
+    with st.form("aipdf_chat_form"):
+        selected = st.multiselect(
+            "Choose source documents",
+            options=list(labels),
+            format_func=lambda document_id: labels[document_id],
+            max_selections=10,
+        )
+        question = st.text_area("Your question", max_chars=2000, height=120)
+        submitted = st.form_submit_button("Ask question", type="primary")
+    if submitted:
+        if not selected:
+            st.error("Select at least one ready document.")
+        elif not question.strip():
+            st.error("Enter a question first.")
+        else:
+            response = api.post(
+                "/chat",
+                json_body={"question": question, "document_ids": selected},
+                idempotency_key=secrets.token_urlsafe(24),
+            )
+            if isinstance(response, dict) and response.get("job_id"):
+                st.session_state["aipdf_active_chat_job"] = str(response["job_id"])
+                st.success("Question accepted. Track its answer below.")
+    job_id = st.session_state.get("aipdf_active_chat_job")
+    if not job_id:
+        return
+    st.subheader("Answer job")
+    refresh = st.button("Refresh answer status", key="aipdf_refresh_chat")
+    if refresh or job_id:
+        job = api.get(f"/jobs/{job_id}")
+        if not isinstance(job, dict):
+            st.error("The jobs API returned an invalid response.")
+            return
+        state = str(job.get("state", "unknown"))
+        st.caption(f"Job state: {state.replace('_', ' ').title()}")
+        if state in {"queued", "running", "retrying"}:
+            st.info("Your question is being processed. Refresh to check for an answer.")
+        elif state == "succeeded" and isinstance(job.get("result"), dict):
+            result = job["result"]
+            if result.get("insufficient_evidence"):
+                st.warning("The selected documents do not provide enough evidence.")
+            if result.get("answer"):
+                st.text(str(result["answer"]))
+            sources = result.get("sources", [])
+            if sources:
+                st.subheader("Sources")
+                for index, source in enumerate(sources, start=1):
+                    page = source.get("page_number", "?")
+                    source_id = str(source.get("source_id", index))
+                    with st.expander(f"Source {index} ({source_id}) · page {page}"):
+                        st.text(str(source.get("filename", "PDF")))
+                        st.text(str(source.get("excerpt", "")))
+        elif state in {"failed", "cancelled", "expired"}:
+            error = job.get("error")
+            if isinstance(error, dict):
+                st.error(
+                    str(error.get("message", "The question could not be completed."))
+                )
+            else:
+                st.error(f"The question job {state}.")
+
+
 def main() -> None:
     st.set_page_config(page_title="AI PDF Chatbot", page_icon="📄")
     st.title("AI PDF Chatbot")
@@ -131,11 +212,15 @@ def main() -> None:
             st.secrets.get("api", {}).get("base_url", "http://localhost:8000")
         )
         with APIClient(base_url, access_token) as api:
-            section = st.sidebar.radio("Workspace", ["Upload PDF", "Documents"])
+            section = st.sidebar.radio(
+                "Workspace", ["Upload PDF", "Documents", "Ask a question"]
+            )
             if section == "Upload PDF":
                 _upload_page(api)
-            else:
+            elif section == "Documents":
                 _documents_page(api)
+            else:
+                _chat_page(api)
     except AuthenticationExpired:
         st.warning("Your sign-in expired. Sign in again to continue.")
         st.logout()
