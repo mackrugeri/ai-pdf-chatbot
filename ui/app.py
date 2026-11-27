@@ -93,6 +93,33 @@ def _documents_page(api: APIClient) -> None:
             error = document.get("error")
             if isinstance(error, dict) and error.get("message"):
                 st.warning(str(error["message"]))
+            document_id = document.get("id")
+            if not document_id:
+                continue
+            actions = st.columns(2)
+            if document.get("status") == "failed" and actions[0].button(
+                "Retry processing", key=f"aipdf_retry_{document_id}"
+            ):
+                result = api.post(
+                    f"/documents/{document_id}/retry",
+                    idempotency_key=secrets.token_urlsafe(24),
+                )
+                if isinstance(result, dict):
+                    st.success(f"Retry job accepted: {result.get('job_id', 'queued')}")
+            confirmed = actions[1].checkbox(
+                "Confirm deletion", key=f"aipdf_confirm_delete_{document_id}"
+            )
+            if confirmed and actions[1].button(
+                "Delete document", key=f"aipdf_delete_{document_id}"
+            ):
+                result = api.delete(
+                    f"/documents/{document_id}",
+                    idempotency_key=secrets.token_urlsafe(24),
+                )
+                if isinstance(result, dict):
+                    st.success(
+                        f"Deletion job accepted: {result.get('job_id', 'queued')}"
+                    )
     previous, next_page = st.columns(2)
     history = st.session_state[history_key]
     if previous.button("Previous page", disabled=not history):
@@ -184,6 +211,92 @@ def _chat_page(api: APIClient) -> None:
                 st.error(f"The question job {state}.")
 
 
+def _jobs_page(api: APIClient) -> None:
+    st.header("Job history")
+    st.caption("Track PDF ingestion, question answering, and deletion jobs.")
+    filter_columns = st.columns(2)
+    state = filter_columns[0].selectbox(
+        "State",
+        [
+            "All",
+            "queued",
+            "running",
+            "retrying",
+            "succeeded",
+            "failed",
+            "cancelling",
+            "cancelled",
+            "expired",
+        ],
+    )
+    job_type = filter_columns[1].selectbox(
+        "Type", ["All", "ingestion", "answer", "cleanup"]
+    )
+    params = {"limit": 20}
+    if state != "All":
+        params["state"] = state
+    if job_type != "All":
+        params["type"] = job_type
+    if st.button("Refresh job history"):
+        st.rerun()
+    result = api.get("/jobs", params=params)
+    items = result.get("items", []) if isinstance(result, dict) else []
+    if not items:
+        st.info("No jobs match these filters.")
+        return
+    for job in items:
+        job_id = str(job.get("id", ""))
+        with st.container(border=True):
+            columns = st.columns([2, 2, 3, 2])
+            columns[0].text(str(job.get("type", "job")).title())
+            columns[1].caption(str(job.get("state", "unknown")).title())
+            columns[2].caption(f"Created: {job.get('created_at', '—')}")
+            columns[3].caption(
+                "Result ready" if job.get("result_available") else "No result yet"
+            )
+            if job_id and st.button("View details", key=f"aipdf_job_{job_id}"):
+                st.session_state["aipdf_selected_job_id"] = job_id
+                st.rerun()
+            if job.get("state") in {"queued", "running", "retrying"} and st.button(
+                "Cancel job", key=f"aipdf_cancel_{job_id}"
+            ):
+                response = api.post(
+                    f"/jobs/{job_id}/cancel",
+                    idempotency_key=secrets.token_urlsafe(24),
+                )
+                if isinstance(response, dict):
+                    st.success("Cancellation accepted.")
+
+    selected = st.session_state.get("aipdf_selected_job_id")
+    if selected:
+        st.subheader("Selected job")
+        if st.button("Refresh selected job", key="aipdf_refresh_job_detail"):
+            st.rerun()
+        job = api.get(f"/jobs/{selected}")
+        if not isinstance(job, dict):
+            st.error("The jobs API returned an invalid response.")
+            return
+        st.caption(
+            f"{str(job.get('type', 'job')).title()} · "
+            f"{str(job.get('state', 'unknown')).replace('_', ' ').title()}"
+        )
+        error = job.get("error")
+        if isinstance(error, dict):
+            st.error(str(error.get("message", "The job failed.")))
+        result_body = job.get("result")
+        if isinstance(result_body, dict):
+            if result_body.get("insufficient_evidence"):
+                st.warning("The selected documents do not provide enough evidence.")
+            if result_body.get("answer"):
+                st.text(str(result_body["answer"]))
+            for index, source in enumerate(result_body.get("sources", []), start=1):
+                page = source.get("page_number", "?")
+                source_id = str(source.get("source_id", index))
+                with st.expander(f"Source {index} ({source_id}) · page {page}"):
+                    st.text(str(source.get("filename", "PDF")))
+                    st.text(str(source.get("excerpt", "")))
+
+
 def main() -> None:
     st.set_page_config(page_title="AI PDF Chatbot", page_icon="📄")
     st.title("AI PDF Chatbot")
@@ -213,14 +326,16 @@ def main() -> None:
         )
         with APIClient(base_url, access_token) as api:
             section = st.sidebar.radio(
-                "Workspace", ["Upload PDF", "Documents", "Ask a question"]
+                "Workspace", ["Upload PDF", "Documents", "Ask a question", "Jobs"]
             )
             if section == "Upload PDF":
                 _upload_page(api)
             elif section == "Documents":
                 _documents_page(api)
-            else:
+            elif section == "Ask a question":
                 _chat_page(api)
+            else:
+                _jobs_page(api)
     except AuthenticationExpired:
         st.warning("Your sign-in expired. Sign in again to continue.")
         st.logout()
