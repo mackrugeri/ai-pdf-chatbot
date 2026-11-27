@@ -50,28 +50,57 @@ def _upload_page(api: APIClient) -> None:
 
 def _documents_page(api: APIClient) -> None:
     st.header("Your documents")
+    st.caption("Review processing state and page/chunk totals for your PDFs.")
+    cursor_key = "aipdf_documents_cursor"
+    history_key = "aipdf_documents_history"
+    st.session_state.setdefault(cursor_key, None)
+    st.session_state.setdefault(history_key, [])
     if st.button("Refresh documents"):
+        st.session_state[cursor_key] = None
+        st.session_state[history_key] = []
         st.rerun()
+    params = {"limit": 20}
+    if st.session_state[cursor_key]:
+        params["cursor"] = st.session_state[cursor_key]
     try:
-        result = api.get("/documents", params={"limit": 100})
+        result = api.get("/documents", params=params)
     except APIClientError as error:
         _show_error(error)
         return
-    items = result.get("items", []) if isinstance(result, dict) else []
-    if not items:
+    if not isinstance(result, dict) or not isinstance(result.get("items"), list):
+        st.error("The documents API returned an invalid response.")
+        return
+    items = result["items"]
+    if not items and not st.session_state[history_key]:
         st.info("No documents are available yet. Upload a PDF to begin.")
         return
     for document in items:
         with st.container(border=True):
-            columns = st.columns([4, 2, 2])
-            columns[0].write(document.get("original_filename", "Untitled PDF"))
-            columns[1].write(
+            heading, status = st.columns([4, 2])
+            heading.text(document.get("original_filename") or "Untitled PDF")
+            status.caption(
                 str(document.get("status", "unknown")).replace("_", " ").title()
             )
-            columns[2].caption(f"Pages: {document.get('page_count') or '—'}")
-            columns[0].caption(f"ID: {document.get('id', '')}")
-            if document.get("error"):
-                st.warning(document["error"].get("message", "Processing failed."))
+            metrics = st.columns(3)
+            metrics[0].caption(f"Pages: {document.get('page_count') or '—'}")
+            metrics[1].caption(
+                f"Textless pages: {document.get('textless_page_count', 0)}"
+            )
+            metrics[2].caption(f"Chunks: {document.get('chunk_count', 0)}")
+            st.caption(f"Document ID: {document.get('id', '')}")
+            error = document.get("error")
+            if isinstance(error, dict) and error.get("message"):
+                st.warning(str(error["message"]))
+    previous, next_page = st.columns(2)
+    history = st.session_state[history_key]
+    if previous.button("Previous page", disabled=not history):
+        st.session_state[cursor_key] = history.pop()
+        st.rerun()
+    next_cursor = result.get("next_cursor")
+    if next_page.button("Next page", disabled=not next_cursor):
+        history.append(st.session_state[cursor_key])
+        st.session_state[cursor_key] = next_cursor
+        st.rerun()
 
 
 def main() -> None:
