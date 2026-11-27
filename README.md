@@ -2,7 +2,7 @@
 
 A portfolio project with production-oriented architecture: upload private PDFs, ask questions, and receive grounded answers with page citations.
 
-**Stage:** FastAPI shell and Docker scaffolding. PDF/model/storage/worker/UI business logic and real token verification are not implemented yet.
+**Stage:** Streamlit UI for login, upload, documents, chat, and jobs is implemented. PostgreSQL, OIDC, and API auth are wired; document/chat business operations, model execution, workers, and object storage remain incomplete.
 
 ## Documentation
 
@@ -65,7 +65,7 @@ python -m app.storage.postgres.migrate
 docker compose --profile dev run --build --rm workspace bash
 ```
 
-The Python image installs the current requirements snapshot, including test tools, and now starts the FastAPI shell by default. UI and worker commands will be added when their implementations exist. Chroma and object-storage integration checks will be added with their implementation. Keycloak is a local development identity provider only; its `start-dev` mode and bundled demo account are never for production.
+The Python image installs the current requirements snapshot, including test tools, and starts the FastAPI shell by default. Run the Streamlit UI on the host as described below; worker commands will be added when their implementation exists. Chroma and object-storage integration checks will be added with their implementation. Keycloak is a local development identity provider only; its `start-dev` mode and bundled demo account are never for production.
 
 For the configured CPU model service, run `docker compose --profile models up -d ollama`, then download models with `docker compose exec ollama ollama pull qwen3:4b` and the same command for `nomic-embed-text`. Do not run host and container Ollama on the same published port.
 
@@ -84,9 +84,9 @@ uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 
 Development documentation: [Swagger UI](http://127.0.0.1:8000/docs). Liveness is `GET /health/live`; readiness returns `200` only when PostgreSQL is reachable and the migration ledger exists. Run migrations explicitly before starting the API; migrations are never applied implicitly at API startup. Versioned routes under `/api/v1` cover uploads, documents, chat, jobs and capabilities, with typed schemas and a common error envelope/request ID.
 
-All `/api/v1` routes require a Bearer access token with the `pdf-api` audience. FastAPI independently validates the configured issuer, signature, asymmetric algorithm, expiry, issuer, audience and required claims against cached JWKS. Unknown signing keys trigger a bounded refresh for key rotation; identity-provider outages fail closed with `503`. The API maps `(issuer, subject)` to PostgreSQL and rejects inactive users. `pdf:read` and `pdf:write` roles are enforced per route. Operations still return `501` after authentication because document/chat business logic is not implemented.
+All `/api/v1` routes require a Bearer access token with the `pdf-api` audience. FastAPI independently validates the configured issuer, signature, asymmetric algorithm, expiry, issuer, audience and required claims against cached JWKS. Unknown signing keys trigger a bounded refresh for key rotation; identity-provider outages fail closed with `503`. The API maps `(issuer, subject)` to PostgreSQL and rejects inactive users. `pdf:read` and `pdf:write` roles are enforced per route. The API business handlers still return `501`, so UI workflows need the remaining backend implementation before real PDFs/jobs can be processed.
 
-Docker alternative: after starting PostgreSQL and running migrations, `docker compose --profile api up --build -d api` exposes the shell on localhost:8000. The API opens a bounded PostgreSQL pool at startup and fails startup if PostgreSQL is configured but unavailable. Model, identity, queue and storage integrations remain incomplete. Interactive docs are disabled when `APP_ENV=production`; use real production validation before any deployment.
+Docker alternative: after starting PostgreSQL and running migrations, `docker compose --profile api up --build -d api` exposes the shell on localhost:8000. The API opens a bounded PostgreSQL pool at startup and fails startup if PostgreSQL is configured but unavailable. Real-model execution, queues, and storage integrations remain incomplete. Interactive docs are disabled when `APP_ENV=production`; use real production validation before any deployment.
 
 Configuration code lives in `app/config/`; `from app.config import Settings` remains the application entry point. Component settings load `.env`, with process environment overriding it. Connection secrets are masked in representations/JSON; validation errors hide inputs. Production requires HTTPS OIDC issuer/JWKS endpoints and an explicit API audience. Validation does not establish connectivity. Never log raw secrets, access tokens or unredacted validation error dictionaries.
 
@@ -100,7 +100,7 @@ Configuration code lives in `app/config/`; `from app.config import Settings` rem
 | `app/config/chroma.py` | Host/port/TLS, tenant/database, optional gateway token. |
 | `app/config/object_storage.py` | Object/journal endpoints, buckets, paired secret keys, signed-URL expiry and independence declaration. |
 
-Blank optional `.env` values are ignored for local scaffolding. Production validation requires configured database/broker/Redis, real model mode, HTTPS OIDC, Chroma host, and HTTPS object/journal endpoints with an independent journal declaration. A declaration cannot prove account/retention isolation; verify it when provisioning. Explicit storage key pairs are optional for future SDK workload identity. Settings perform no network calls. The API manages PostgreSQL lifecycle/readiness; authentication, workers, object storage and business operations remain incomplete.
+Blank optional `.env` values are ignored for local scaffolding. Production validation requires configured database/broker/Redis, real model mode, HTTPS OIDC, Chroma host, and HTTPS object/journal endpoints with an independent journal declaration. A declaration cannot prove account/retention isolation; verify it when provisioning. Explicit storage key pairs are optional for future SDK workload identity. Settings perform no network calls. The API manages PostgreSQL lifecycle/readiness and OIDC authentication; workers, object storage and business operations remain incomplete.
 
 ### PostgreSQL schema
 
@@ -111,3 +111,11 @@ Blank optional `.env` values are ignored for local scaffolding. Production valid
 The `auth` Compose profile starts Keycloak in development mode and imports [`auth/ai-pdf-chatbot-realm.json`](auth/ai-pdf-chatbot-realm.json). The realm provisions a confidential Streamlit OIDC client, the `pdf-api` audience, `pdf:read`/`pdf:write` roles and a `demo` user. Set separate local-only Keycloak admin, client and demo passwords in `.env`; copy `.streamlit/secrets.toml.example` and use the same Streamlit client secret there. Generate a private Streamlit cookie secret (for example, `python -c "import secrets; print(secrets.token_urlsafe(48))"`). Never commit `.streamlit/secrets.toml`. The imported realm is applied only when Keycloak first creates it; later realm edits require updating it through the local admin console or a deliberately reset local Keycloak data volume.
 
 Run the UI with `streamlit run ui/app.py`. Streamlit performs OIDC Authorization Code login, exposes only the access token required for API calls, and logs out through `st.logout()`. The token remains in Streamlit's auth session and is not displayed, logged, or copied to app session state. The API—not the UI—validates the token and derives ownership from the verified `sub`; client-provided owner IDs are never trusted. A 401 in the UI prompts reauthentication. For local development, `.env` uses `localhost` as the token issuer; the API container reaches JWKS through the internal `keycloak` service address.
+
+## Streamlit UI
+
+Copy `.streamlit/secrets.toml.example` to `.streamlit/secrets.toml`, set the private cookie secret and match `client_secret` to `KEYCLOAK_STREAMLIT_CLIENT_SECRET` in `.env`. Start local PostgreSQL, apply migrations, and start Keycloak with `docker compose --profile auth up -d keycloak`. Start the API with `docker compose --profile api up --build -d api`, then run `streamlit run ui/app.py` from the project virtual environment.
+
+The UI provides PDF signature/size validation and presigned upload transfer, owner-scoped document status/pagination, multi-document questions with job status and page/source excerpts, job filtering/history/cancellation, failed-ingestion retry, and confirmation-gated deletion. The access token is sent only to FastAPI; signed upload targets use a separate HTTP client without the Bearer header. UI error text, filenames, model answers, and excerpts are rendered as plain text. App-held cursor, job, and widget state is cleared on logout or reauthentication.
+
+The upload screen sends its file and the other screens call their documented `/api/v1` operations. Those backend operations currently return `501`; this is a visible API capability boundary, not an end-to-end functioning chatbot yet. The UI uses explicit refresh actions for job status and does not claim that upload, ingestion, retrieval, answer generation, retry, or deletion has completed until the API returns those results.

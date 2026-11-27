@@ -15,21 +15,32 @@ def _show_error(error: APIClientError) -> None:
     elif error.status_code == 403:
         st.error("Your account does not have permission for this operation.")
     elif error.retryable:
-        st.warning(f"{error}. You can retry when the service is available.")
+        st.text(f"{error} You can retry when the service is available.")
     else:
-        st.error(str(error))
+        st.text(str(error))
+
+
+def _clear_app_state() -> None:
+    for key in list(st.session_state):
+        if key.startswith("aipdf_"):
+            del st.session_state[key]
 
 
 def _upload_page(api: APIClient) -> None:
     st.header("Upload a PDF")
     st.caption("PDF files up to 20 MiB are accepted.")
     with st.form("aipdf_upload_form", clear_on_submit=False):
-        upload = st.file_uploader("Choose a PDF", type=["pdf"])
-        submitted = st.form_submit_button("Upload and process", type="primary")
+        upload = st.file_uploader("Choose a PDF", type=["pdf"], key="aipdf_pdf_file")
+        submitted = st.form_submit_button(
+            "Upload and process", type="primary", key="aipdf_upload_submit"
+        )
     if not submitted:
         return
     if upload is None:
         st.error("Choose a PDF file first.")
+        return
+    if upload.size <= 0 or upload.size > MAX_PDF_BYTES:
+        st.error("The PDF must be non-empty and no larger than 20 MiB.")
         return
     content = upload.getvalue()
     if len(content) == 0 or len(content) > MAX_PDF_BYTES:
@@ -46,6 +57,8 @@ def _upload_page(api: APIClient) -> None:
             st.caption(f"Document ID: {result.get('document_id', 'pending')}")
             if result.get("job_id"):
                 st.caption(f"Ingestion job: {result['job_id']}")
+    except AuthenticationExpired:
+        raise
     except APIClientError as error:
         _show_error(error)
 
@@ -66,6 +79,8 @@ def _documents_page(api: APIClient) -> None:
         params["cursor"] = st.session_state[cursor_key]
     try:
         result = api.get("/documents", params=params)
+    except AuthenticationExpired:
+        raise
     except APIClientError as error:
         _show_error(error)
         return
@@ -92,7 +107,7 @@ def _documents_page(api: APIClient) -> None:
             st.caption(f"Document ID: {document.get('id', '')}")
             error = document.get("error")
             if isinstance(error, dict) and error.get("message"):
-                st.warning(str(error["message"]))
+                st.text(str(error["message"]))
             document_id = document.get("id")
             if not document_id:
                 continue
@@ -140,6 +155,8 @@ def _chat_page(api: APIClient) -> None:
         if isinstance(documents_response, dict)
         else []
     )
+    if isinstance(documents_response, dict) and documents_response.get("next_cursor"):
+        st.caption("The question picker shows the first 100 documents.")
     ready = [document for document in documents if document.get("status") == "ready"]
     if not ready:
         st.info("Upload a PDF and wait until it is ready before asking a question.")
@@ -155,9 +172,14 @@ def _chat_page(api: APIClient) -> None:
             options=list(labels),
             format_func=lambda document_id: labels[document_id],
             max_selections=10,
+            key="aipdf_chat_documents",
         )
-        question = st.text_area("Your question", max_chars=2000, height=120)
-        submitted = st.form_submit_button("Ask question", type="primary")
+        question = st.text_area(
+            "Your question", max_chars=2000, height=120, key="aipdf_question"
+        )
+        submitted = st.form_submit_button(
+            "Ask question", type="primary", key="aipdf_chat_submit"
+        )
     if submitted:
         if not selected:
             st.error("Select at least one ready document.")
@@ -204,7 +226,7 @@ def _chat_page(api: APIClient) -> None:
         elif state in {"failed", "cancelled", "expired"}:
             error = job.get("error")
             if isinstance(error, dict):
-                st.error(
+                st.text(
                     str(error.get("message", "The question could not be completed."))
                 )
             else:
@@ -232,7 +254,19 @@ def _jobs_page(api: APIClient) -> None:
     job_type = filter_columns[1].selectbox(
         "Type", ["All", "ingestion", "answer", "cleanup"]
     )
+    cursor_key = "aipdf_jobs_cursor"
+    history_key = "aipdf_jobs_history"
+    st.session_state.setdefault(cursor_key, None)
+    st.session_state.setdefault(history_key, [])
     params = {"limit": 20}
+    filter_state_key = "aipdf_jobs_filter"
+    current_filters = (state, job_type)
+    if st.session_state.get(filter_state_key) != current_filters:
+        st.session_state[filter_state_key] = current_filters
+        st.session_state[cursor_key] = None
+        st.session_state[history_key] = []
+    if st.session_state[cursor_key]:
+        params["cursor"] = st.session_state[cursor_key]
     if state != "All":
         params["state"] = state
     if job_type != "All":
@@ -267,6 +301,16 @@ def _jobs_page(api: APIClient) -> None:
                 if isinstance(response, dict):
                     st.success("Cancellation accepted.")
 
+    prev_col, next_col = st.columns(2)
+    if prev_col.button("Previous jobs", disabled=not st.session_state[history_key]):
+        st.session_state[cursor_key] = st.session_state[history_key].pop()
+        st.rerun()
+    next_cursor = result.get("next_cursor") if isinstance(result, dict) else None
+    if next_col.button("Next jobs", disabled=not next_cursor):
+        st.session_state[history_key].append(st.session_state[cursor_key])
+        st.session_state[cursor_key] = next_cursor
+        st.rerun()
+
     selected = st.session_state.get("aipdf_selected_job_id")
     if selected:
         st.subheader("Selected job")
@@ -282,7 +326,7 @@ def _jobs_page(api: APIClient) -> None:
         )
         error = job.get("error")
         if isinstance(error, dict):
-            st.error(str(error.get("message", "The job failed.")))
+            st.text(str(error.get("message", "The job failed.")))
         result_body = job.get("result")
         if isinstance(result_body, dict):
             if result_body.get("insufficient_evidence"):
@@ -308,6 +352,7 @@ def main() -> None:
 
     st.sidebar.success("Signed in")
     if st.sidebar.button("Sign out"):
+        _clear_app_state()
         st.logout()
         st.stop()
     try:
@@ -337,8 +382,11 @@ def main() -> None:
             else:
                 _jobs_page(api)
     except AuthenticationExpired:
-        st.warning("Your sign-in expired. Sign in again to continue.")
-        st.logout()
+        st.warning("Your access token expired. Sign in again to continue.")
+        if st.button("Sign in again", type="primary"):
+            _clear_app_state()
+            st.logout()
+            st.stop()
     except (APIClientError, ValueError) as error:
         _show_error(error) if isinstance(error, APIClientError) else st.error(
             str(error)

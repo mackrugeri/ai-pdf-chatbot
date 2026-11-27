@@ -172,6 +172,8 @@ class APIClient:
             payload = None
         if not response.is_success:
             error = payload.get("error", {}) if isinstance(payload, dict) else {}
+            if not isinstance(error, dict):
+                error = {}
             raise APIClientError(
                 error.get("message", "The API could not complete this operation."),
                 status_code=response.status_code,
